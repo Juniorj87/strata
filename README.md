@@ -50,7 +50,9 @@ export default class Twap {
 }
 ```
 
-Templates included: **momentum**, **mean reversion**, **TWAP**, **grid**, **DCA**.
+Templates included: **momentum**, **mean reversion**, **TWAP**, **grid**, **DCA** — all five live in
+[`contracts/`](./contracts) as plain Asentum contract source, deployable with
+`asentum deploy contracts/twap.js --network testnet`.
 
 ## Pages
 
