@@ -1,7 +1,7 @@
 // Strata template: mean-reversion
 //
 // Sells into strength, buys back on weakness, against a rolling average.
-// The window is kept in contract storage — nothing is kept off-chain.
+// The window is kept in contract storage - nothing is kept off-chain.
 //
 // Deployed with: init(pool, windowSize, bandBps, sizeWei)
 

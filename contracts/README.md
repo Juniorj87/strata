@@ -1,6 +1,6 @@
 # Strategy templates
 
-Five strategy contracts in the Asentum contract format — plain JavaScript, no compiler, no
+Five strategy contracts in the Asentum contract format - plain JavaScript, no compiler, no
 imports. Each one schedules itself with `cron.schedule(...)` and trades through an AMM pool
 with `E(pool).swapExactIn(...)`.
 
@@ -23,18 +23,18 @@ escrow so the scheduled job can keep firing.
 
 ## What the chain gives you
 
-- `cron.schedule(this.address, 'tick', [], when, interval, maxRuns, gasLimit)` — the chain
+- `cron.schedule(this.address, 'tick', [], when, interval, maxRuns, gasLimit)` - the chain
   fires the job; there is no keeper to run and nothing to keep alive.
-- `E(addr).method(args)` — cross-contract calls are asynchronous, so a strategy cannot be
+- `E(addr).method(args)` - cross-contract calls are asynchronous, so a strategy cannot be
   re-entered mid-execution and a failed leg reverts the whole tick.
-- `emit(name, payload)` — every decision is an indexed event, which is what the registry and
+- `emit(name, payload)` - every decision is an indexed event, which is what the registry and
   the P&L indexer read.
 - The deployed source *is* the artifact. Anyone can read it in the explorer and verify the
   BLAKE3 hash before funding it.
 
 ## Status
 
-These templates have not been deployed yet — they are written against the documented VM
+These templates have not been deployed yet - they are written against the documented VM
 globals but not exercised against a live node. The constants `BASE`, `POOL_TOKEN` and
 `QUOTE_TOKEN` are placeholders for the pool's token addresses and must be replaced with the
 real ones for the pool you trade.

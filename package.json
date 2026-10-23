@@ -8,9 +8,19 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "chain:check": "node --experimental-strip-types scripts/check-chain.ts",
+    "chain:verify": "node --experimental-strip-types scripts/check-verify.ts",
+    "deploy:momentum-signal": "node --experimental-strip-types scripts/deploy.ts --template momentum-signal",
+    "deploy:momentum-trader": "node --experimental-strip-types scripts/deploy.ts --template momentum-trader",
+    "deploy:twap": "node --experimental-strip-types scripts/deploy.ts --template twap",
+    "deploy:grid": "node --experimental-strip-types scripts/deploy.ts --template grid",
+    "deploy:dca": "node --experimental-strip-types scripts/deploy.ts --template dca"
   },
   "dependencies": {
+    "@asentum/connect": "^0.1.9",
+    "@asentum/sdk": "^0.2.0",
+    "@noble/hashes": "^2.4.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-router-dom": "^7.18.4"
