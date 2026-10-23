@@ -1,12 +1,20 @@
 import { Link, NavLink } from 'react-router-dom';
+import { useWallet } from '@asentum/connect';
+import { useAsync } from '../lib/hooks';
+import { getHeads } from '../lib/rpc';
+import { useTheme } from '../lib/theme';
 
 const nav = [
   { to: '/strategies', label: 'Strategies' },
-  { to: '/#how', label: 'How it works' },
+  { to: '/how', label: 'How it works' },
   { to: '/deploy', label: 'Deploy' },
 ];
 
 export function Shell({ children }: { children: React.ReactNode }) {
+  const [theme, toggleTheme] = useTheme();
+  const { data: heads } = useAsync(() => getHeads(), 5000);
+  const wallet = useWallet();
+
   return (
     <div className="app">
       <header className="topbar">
@@ -16,20 +24,38 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <span className="brand-tag">on asentum</span>
           </Link>
           <nav className="nav">
-            {nav.map((item) =>
-              item.to.includes('#') ? (
-                <a key={item.to} href={item.to}>
-                  {item.label}
-                </a>
-              ) : (
-                <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? 'active' : '')}>
-                  {item.label}
-                </NavLink>
-              ),
-            )}
+            {nav.map((item) => (
+              <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? 'active' : '')}>
+                {item.label}
+              </NavLink>
+            ))}
             <a href="https://www.asentum.com/docs" target="_blank" rel="noreferrer">
               Docs ↗
             </a>
+            <button className="theme-toggle" onClick={toggleTheme} type="button" aria-label="Toggle colour theme">
+              {theme === 'dark' ? 'Light' : 'Dark'}
+            </button>
+            {wallet.connected && wallet.ase1Address ? (
+              <a
+                className="mono"
+                style={{ fontSize: 12.5, color: 'var(--accent)', textDecoration: 'none' }}
+                href={`https://explorer.asentum.com/address/${wallet.ase1Address}`}
+                target="_blank"
+                rel="noreferrer"
+                title={wallet.ase1Address}
+              >
+                {`${wallet.ase1Address.slice(0, 10)}…${wallet.ase1Address.slice(-4)}`}
+              </a>
+            ) : (
+              <button
+                className="theme-toggle"
+                onClick={() => wallet.openConnect()}
+                type="button"
+                style={{ color: 'var(--accent)', borderColor: 'var(--accent-line)' }}
+              >
+                {wallet.connecting ? 'Connecting…' : 'Connect'}
+              </button>
+            )}
           </nav>
         </div>
       </header>
@@ -43,18 +69,19 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <span className="brand-mark" style={{ fontSize: 15 }}>
                 STRATA
               </span>
-              <span className="dim" style={{ fontSize: 13, maxWidth: 260 }}>
-                Trading logic as a contract. The chain is the scheduler, the AMM is the venue, the source is
-                public.
+              <span className="dim" style={{ fontSize: 13, maxWidth: 280 }}>
+                Adaptive trading strategies as contracts. The chain is the scheduler, the AMM is the venue, the
+                source is public.
+              </span>
+              <span className="live-dot" style={{ marginTop: 8 }}>
+                chain 1423{heads ? ` · block ${heads.finalized.toLocaleString('en-US')}` : ''}
               </span>
             </div>
             <div className="footer-col">
               <span className="label">Product</span>
               <Link to="/strategies">Strategies</Link>
               <Link to="/deploy">Deploy a strategy</Link>
-              <a href="https://ide.asentum.com" target="_blank" rel="noreferrer">
-                Asentum IDE ↗
-              </a>
+              <Link to="/how">How it works</Link>
             </div>
             <div className="footer-col">
               <span className="label">Ecosystem</span>

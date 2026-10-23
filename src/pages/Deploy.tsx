@@ -1,107 +1,44 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import type { Pair, Strategy } from '../types';
-import { fmtAse } from '../lib/format';
-
-type TemplateId = Strategy['template'];
-
-const TEMPLATES: { id: TemplateId; name: string; desc: string; cron: string }[] = [
-  {
-    id: 'momentum',
-    name: 'Momentum',
-    desc: 'Buys when the rolling return crosses a threshold, sells when it crosses back.',
-    cron: 'every 60s',
-  },
-  {
-    id: 'mean-reversion',
-    name: 'Mean reversion',
-    desc: 'Sells into strength, buys back on weakness against a moving average.',
-    cron: 'every 120s',
-  },
-  { id: 'twap', name: 'TWAP', desc: 'Slices one order across N intervals so the fill is spread.', cron: 'every 300s' },
-  { id: 'grid', name: 'Grid', desc: 'Two-sided orders around a reference price, re-centred after each fill.', cron: 'every 60s' },
-  { id: 'dca', name: 'DCA', desc: 'Fixed notional every interval. The set-and-forget baseline.', cron: 'every 3600s' },
-];
-
-const PAIRS: Pair[] = ['ASE/USD', 'ASE/aUSD', 'AUR/ASE', 'GRID/ASE'];
-const INTERVALS = [60, 120, 300, 900, 3600];
-
-function hash32(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i += 1) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  return h;
-}
-
-function fakeAddress(seed: string): string {
-  const chars = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
-  const out = [];
-  let h = hash32(seed);
-  for (let i = 0; i < 38; i += 1) {
-    h = (h * 1103515245 + 12345) >>> 0;
-    out.push(chars[h % chars.length]);
-  }
-  return `ase1${out.join('')}`;
-}
+import { useAsync } from '../lib/hooks';
+import { loadPools } from '../lib/registry';
+import { TEMPLATES, templateById } from '../lib/templates';
+import { weiToAse } from '../lib/format';
+import { WalletPanel } from '../components/WalletPanel';
 
 export function Deploy() {
   const [params] = useSearchParams();
-  const preset = params.get('template') as TemplateId | null;
-  const [template, setTemplate] = useState<TemplateId>(preset && TEMPLATES.some((t) => t.id === preset) ? preset : 'momentum');
-  const [pair, setPair] = useState<Pair>('ASE/USD');
-  const [notional, setNotional] = useState('250');
+  const [templateId, setTemplateId] = useState(templateById(params.get('template')).id);
+  const [poolId, setPoolId] = useState('1');
   const [threshold, setThreshold] = useState('120');
-  const [interval, setInterval] = useState(60);
-  const [deployed, setDeployed] = useState<{ address: string; txHash: string } | null>(null);
+  const [size, setSize] = useState('250');
+  const [interval, setInterval] = useState(templateById(params.get('template')).intervalSec);
+  const [copied, setCopied] = useState(false);
 
-  const meta = TEMPLATES.find((t) => t.id === template)!;
-  const gasEstimate = useMemo(() => 0.0042 + interval / 3600, [interval]);
+  const pools = useAsync(() => loadPools(), 10000);
+  const template = templateById(templateId);
 
-  if (deployed) {
-    return (
-      <section className="wrap section">
-        <div className="panel" style={{ maxWidth: 640, margin: '40px auto' }}>
-          <div className="success">
-            <span className="tag tag-deploy">deployed</span>
-            <h2>Your strategy is armed.</h2>
-            <p className="muted" style={{ maxWidth: 440, margin: '0 auto' }}>
-              The contract scheduled its first job in the cron registry. It will start trading on the next
-              interval boundary, without any server involved.
-            </p>
-            <div className="addr-box">{deployed.address}</div>
-            <div className="mono dim" style={{ fontSize: 12 }}>
-              tx {deployed.txHash}
-            </div>
-            <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 26 }}>
-              <Link className="btn btn-ghost" to="/strategies">
-                Open the registry
-              </Link>
-              <a
-                className="btn btn-ghost"
-                href={`https://explorer.asentum.com/address/${deployed.address}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Explorer ↗
-              </a>
-            </div>
-          </div>
-        </div>
-        <p className="mono dim" style={{ textAlign: 'center', fontSize: 12 }}>
-          Demo mode — no wallet is connected. The real flow signs with your Asentum wallet and broadcasts to
-          chain 1423.
-        </p>
-      </section>
-    );
-  }
+  const command = `npm run deploy:${template.id} -- --pool ${poolId} --threshold ${threshold} --size ${size} --interval ${interval}`;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  };
 
   return (
     <>
       <section className="wrap detail-head">
         <span className="label">Deployer</span>
         <h1 className="detail-title">Ship a strategy, not a bot.</h1>
-        <p className="section-note" style={{ maxWidth: 620 }}>
-          Pick a template, set the parameters, and the contract schedules itself. The source you deploy is the
-          source that runs — publicly, forever.
+        <p className="section-note" style={{ maxWidth: 660 }}>
+          The browser never holds a key. Pick a template and parameters, then run one command - the script signs
+          with your wallet, deploys the source, arms the cron job and writes the address back into the registry
+          config.
         </p>
       </section>
 
@@ -114,17 +51,16 @@ export function Deploy() {
                 <button
                   key={t.id}
                   type="button"
-                  className={`template ${template === t.id ? 'on' : ''}`}
+                  className={`template ${template.id === t.id ? 'on' : ''}`}
                   onClick={() => {
-                    setTemplate(t.id);
-                    const match = t.cron.match(/\d+/);
-                    if (match) setInterval(Number(match[0]));
+                    setTemplateId(t.id);
+                    setInterval(t.intervalSec);
                   }}
                 >
                   <div className="template-name">{t.name}</div>
                   <div className="template-desc">{t.desc}</div>
                   <div className="mono dim" style={{ fontSize: 11, marginTop: 10 }}>
-                    {t.cron}
+                    every {t.intervalSec}s · {t.requires === 'gas' ? 'gas only' : 'needs tokens'}
                   </div>
                 </button>
               ))}
@@ -136,26 +72,16 @@ export function Deploy() {
 
             <div className="row-2">
               <div className="field">
-                <label htmlFor="pair">Pair</label>
-                <select id="pair" className="input" value={pair} onChange={(e) => setPair(e.target.value as Pair)}>
-                  {PAIRS.map((p) => (
-                    <option key={p}>{p}</option>
+                <label htmlFor="pool">Pool</label>
+                <select id="pool" className="input" value={poolId} onChange={(e) => setPoolId(e.target.value)}>
+                  {(pools.data ?? []).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.symbol}/ASE · pool #{p.id}
+                    </option>
                   ))}
+                  {pools.data?.length === 0 && <option value="1">Auras pool #1</option>}
                 </select>
               </div>
-              <div className="field">
-                <label htmlFor="notional">Notional per run (ASE)</label>
-                <input
-                  id="notional"
-                  className="input"
-                  value={notional}
-                  onChange={(e) => setNotional(e.target.value)}
-                  inputMode="decimal"
-                />
-              </div>
-            </div>
-
-            <div className="row-2">
               <div className="field">
                 <label htmlFor="threshold">Threshold (bps)</label>
                 <input
@@ -166,68 +92,113 @@ export function Deploy() {
                   inputMode="numeric"
                 />
               </div>
+            </div>
+
+            <div className="row-2">
+              <div className="field">
+                <label htmlFor="size">Size per run</label>
+                <input
+                  id="size"
+                  className="input"
+                  value={size}
+                  onChange={(e) => setSize(e.target.value)}
+                  inputMode="decimal"
+                />
+              </div>
               <div className="field">
                 <label htmlFor="interval">Interval (seconds)</label>
-                <select
+                <input
                   id="interval"
                   className="input"
                   value={interval}
                   onChange={(e) => setInterval(Number(e.target.value))}
-                >
-                  {INTERVALS.map((i) => (
-                    <option key={i} value={i}>
-                      {i}
-                    </option>
-                  ))}
-                </select>
+                  inputMode="numeric"
+                />
               </div>
             </div>
 
             <div className="notice" style={{ marginTop: 22 }}>
-              Cron jobs are prepaid: the chain debits a gas escrow on every fire and stops the job when the
-              escrow runs out. Top up any time, cancel whenever — unused escrow is refunded.
+              {template.requires === 'gas' ? (
+                <>
+                  This template only reads and publishes. It needs a few ASE for the cron gas escrow -{' '}
+                  <a className="link-arrow" href="https://airdrop.asentum.com" target="_blank" rel="noreferrer">
+                    get test ASE ↗
+                  </a>
+                  .
+                </>
+              ) : (
+                <>
+                  This template trades, so it needs the pool's ARC-20 token in the contract balance and an approve to
+                  Auras. A contract cannot open the native side of a swap - <code>E()</code> carries no value - so
+                  the strategy sells the token side into ASE.
+                </>
+              )}
             </div>
+
+            {pools.data && pools.data.length > 0 && (
+              <div className="panel" style={{ marginTop: 18 }}>
+                <div className="panel-head">
+                  <span className="label">Live pools</span>
+                </div>
+                <div className="panel-body">
+                  <dl className="kv">
+                    {pools.data.map((pool) => (
+                      <div key={pool.id} style={{ display: 'contents' }}>
+                        <dt>
+                          {pool.symbol}/ASE #{pool.id}
+                        </dt>
+                        <dd>
+                          {weiToAse(pool.reserveToken, 2)} {pool.symbol} · {weiToAse(pool.reserveNative, 2)} ASE ·
+                          spot {weiToAse(pool.spot, 6)}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              </div>
+            )}
           </div>
 
           <aside className="panel" style={{ position: 'sticky', top: 88 }}>
-            <div className="panel-head">
+            <WalletPanel />
+            <div className="panel-head" style={{ marginTop: 20 }}>
               <span className="label">03 / REVIEW</span>
             </div>
             <div className="panel-body">
               <dl className="kv">
                 <dt>Template</dt>
-                <dd>{meta.name}</dd>
-                <dt>Pair</dt>
-                <dd>{pair}</dd>
-                <dt>Notional</dt>
-                <dd>{notional} ASE / run</dd>
+                <dd>{template.name}</dd>
+                <dt>Contract</dt>
+                <dd style={{ fontSize: 11.5 }}>{template.contract}</dd>
+                <dt>Pool</dt>
+                <dd>#{poolId}</dd>
                 <dt>Threshold</dt>
                 <dd>{threshold} bps</dd>
+                <dt>Size</dt>
+                <dd>{size}</dd>
                 <dt>Cadence</dt>
                 <dd>every {interval}s</dd>
-                <dt>Deploy fee</dt>
-                <dd>≈ {gasEstimate.toFixed(4)} ASE</dd>
-                <dt>Escrow</dt>
-                <dd>≈ {fmtAse(0.5)}</dd>
+                <dt>Needs</dt>
+                <dd>{template.requires === 'gas' ? 'gas only' : 'token balance + approve'}</dd>
               </dl>
 
-              <button
-                className="btn btn-primary"
-                style={{ width: '100%', marginTop: 22, justifyContent: 'center' }}
-                type="button"
-                onClick={() =>
-                  setDeployed({
-                    address: fakeAddress(`${template}${pair}${notional}${threshold}${interval}`),
-                    txHash: `0x${hash32(`${template}${notional}${Date.now()}`).toString(16).padStart(12, '0')}`,
-                  })
-                }
-              >
-                Deploy to testnet
-              </button>
+              <div className="cmd" style={{ marginTop: 18 }}>
+                <span className="prompt">$</span>
+                <span>{command}</span>
+                <button onClick={copy} type="button">
+                  {copied ? 'copied' : 'copy'}
+                </button>
+              </div>
 
-              <p className="mono dim" style={{ fontSize: 11.5, marginTop: 12, textAlign: 'center' }}>
-                demo mode · no wallet connected
+              <p className="muted" style={{ fontSize: 13.5, marginTop: 16 }}>
+                The script needs a funded testnet key in <code>STRATA_SECRET_KEY</code>. It deploys, calls{' '}
+                <code>init</code>, arms the cron job, then prints the contract address and writes it into{' '}
+                <code>src/config/strategies.json</code> so this site picks it up on the next refresh.
               </p>
+
+              <Link className="btn btn-ghost" to="/how" style={{ width: '100%', justifyContent: 'center', marginTop: 14 }}>
+                How the pieces fit →
+              </Link>
             </div>
           </aside>
         </div>

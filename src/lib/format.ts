@@ -33,3 +33,22 @@ export function fmtAge(seconds: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   return `${Math.floor(seconds / 3600)}h ago`;
 }
+
+const WEI = 10n ** 18n;
+
+/** wei (decimal string) → ASE with a readable number of decimals. */
+export function weiToAse(wei: string | bigint, digits = 4): string {
+  const value = typeof wei === 'bigint' ? wei : BigInt(wei || '0');
+  const whole = value / WEI;
+  const frac = value % WEI;
+  const fracStr = frac.toString().padStart(18, '0').slice(0, digits);
+  return digits > 0 ? `${whole}.${fracStr}` : `${whole}`;
+}
+
+export function fmtWei(wei: string | bigint, digits = 4): string {
+  const value = typeof wei === 'bigint' ? wei : BigInt(wei || '0');
+  const ase = Number(weiToAse(value, digits));
+  if (ase >= 1_000_000) return `${(ase / 1_000_000).toFixed(2)}M ASE`;
+  if (ase >= 1000) return `${(ase / 1000).toFixed(2)}K ASE`;
+  return `${weiToAse(value, digits)} ASE`;
+}

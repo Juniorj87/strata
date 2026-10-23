@@ -1,18 +1,41 @@
 import { Link, useParams } from 'react-router-dom';
-import { executionLog, strategyById } from '../data/mock';
-import { fmtAge, fmtAse, fmtDuration, fmtNum, fmtPct, shortAddr, shortHash } from '../lib/format';
+import { useAsync } from '../lib/hooks';
+import { loadStrategy } from '../lib/registry';
+import { explorerAddressUrl, explorerTxUrl } from '../lib/rpc';
+import { fmtDuration, fmtWei, shortHash, weiToAse } from '../lib/format';
 import { CodeBlock } from '../components/CodeBlock';
-import { EquityChart } from '../components/Charts';
+
+function nextRunLabel(cron: { nextRunAt: string } | null): string {
+  if (!cron?.nextRunAt) return 'not scheduled';
+  const raw = Number(cron.nextRunAt);
+  if (!Number.isFinite(raw) || raw === 0) return 'not scheduled';
+  const seconds = raw > 1e12 ? Math.floor((raw - Date.now()) / 1000) : Math.floor(raw - Date.now() / 1000);
+  return seconds > 0 ? `in ${fmtDuration(seconds)}` : 'due now';
+}
 
 export function StrategyDetail() {
-  const { id } = useParams();
-  const strategy = strategyById(id);
+  const { address = '' } = useParams();
+  const { data: strategy, loading, error } = useAsync(
+    () => loadStrategy(address.toLowerCase()),
+    12000,
+    address.length > 0,
+  );
 
-  if (!strategy) {
+  if (loading) {
+    return (
+      <section className="wrap section">
+        <div className="skeleton" style={{ height: 320 }} />
+      </section>
+    );
+  }
+
+  if (error || !strategy) {
     return (
       <section className="wrap section">
         <h1 className="detail-title">Strategy not found</h1>
-        <p className="muted">It may have been removed or never existed.</p>
+        <p className="muted">
+          {error ? `Chain read failed: ${error}` : 'No contract source at that address - it may not exist yet.'}
+        </p>
         <Link className="btn btn-ghost" to="/strategies" style={{ marginTop: 20 }}>
           Back to registry
         </Link>
@@ -20,46 +43,48 @@ export function StrategyDetail() {
     );
   }
 
-  const positive = strategy.pnlPct >= 0;
-
   return (
     <>
       <section className="wrap detail-head">
         <span className="label">{strategy.template} template</span>
         <h1 className="detail-title">{strategy.name}</h1>
         <div className="detail-meta">
-          <span className={`pill pill-${strategy.status}`}>{strategy.status}</span>
-          <span>{strategy.pair}</span>
+          <span className={strategy.verified ? 'verify' : 'verify bad'}>
+            {strategy.verified ? '✓ source hash matches codeHash' : '✗ hash mismatch'}
+          </span>
+          <span className="mono">{strategy.ase1}</span>
           <span>·</span>
-          <span className="mono">{shortAddr(strategy.address, 14, 8)}</span>
+          <span>first event at block {strategy.deployBlock.toLocaleString('en-US')}</span>
           <span>·</span>
-          <span>deployed {strategy.deployedAgo}</span>
-          <span>·</span>
-          <span>by {strategy.author}</span>
+          <a className="link-arrow" href={explorerAddressUrl(strategy.address)} target="_blank" rel="noreferrer">
+            explorer ↗
+          </a>
         </div>
       </section>
 
       <section className="wrap">
         <div className="metrics">
           <div className="metric">
-            <div className="metric-label">P&amp;L</div>
-            <div className={`metric-value ${positive ? 'up' : 'down'}`}>{fmtPct(strategy.pnlPct)}</div>
-          </div>
-          <div className="metric">
-            <div className="metric-label">Net ASE</div>
-            <div className={`metric-value ${positive ? 'up' : 'down'}`}>{fmtAse(strategy.pnlAse)}</div>
-          </div>
-          <div className="metric">
-            <div className="metric-label">Win rate</div>
-            <div className="metric-value">{strategy.winRate.toFixed(1)}%</div>
-          </div>
-          <div className="metric">
-            <div className="metric-label">Trades</div>
-            <div className="metric-value">{fmtNum(strategy.trades)}</div>
+            <div className="metric-label">Fills</div>
+            <div className="metric-value">{strategy.trades}</div>
           </div>
           <div className="metric">
             <div className="metric-label">Volume</div>
-            <div className="metric-value">{fmtAse(strategy.volumeAse, 0)}</div>
+            <div className="metric-value">{fmtWei(strategy.volumeWei, 2)}</div>
+          </div>
+          <div className="metric">
+            <div className="metric-label">ASE held</div>
+            <div className="metric-value">{fmtWei(strategy.balanceAse, 3)}</div>
+          </div>
+          <div className="metric">
+            <div className="metric-label">Realised</div>
+            <div className="metric-value">{fmtWei(strategy.realisedWei, 3)}</div>
+          </div>
+          <div className="metric">
+            <div className="metric-label">Cadence</div>
+            <div className="metric-value">
+              {strategy.intervalSec ? fmtDuration(strategy.intervalSec) : '-'}
+            </div>
           </div>
         </div>
       </section>
@@ -69,24 +94,49 @@ export function StrategyDetail() {
           <div style={{ display: 'grid', gap: 20 }}>
             <div className="panel">
               <div className="panel-head">
-                <span className="label">Equity curve</span>
+                <span className="label">Contract source - read from the node</span>
                 <span className="mono dim" style={{ fontSize: 12 }}>
-                  indexed to 100 at deploy
+                  {strategy.source.length} chars
                 </span>
               </div>
-              <div className="chart-wrap">
-                <EquityChart data={strategy.equity} />
-              </div>
+              <CodeBlock source={strategy.source} />
             </div>
 
             <div className="panel">
               <div className="panel-head">
-                <span className="label">Contract source</span>
+                <span className="label">Events</span>
                 <span className="mono dim" style={{ fontSize: 12 }}>
-                  verifiable by hash
+                  {strategy.events.length} on chain
                 </span>
               </div>
-              <CodeBlock source={strategy.source} />
+              {strategy.events.length === 0 ? (
+                <div className="panel-body muted">No events emitted yet.</div>
+              ) : (
+                strategy.events.map((event) => (
+                  <div className="log-row" key={`${event.txHash}-${event.block}-${event.name}`}>
+                    <span className="dim">#{event.block.toLocaleString('en-US')}</span>
+                    <span>
+                      {event.name}
+                      <span className="dim" style={{ display: 'block', fontSize: 11 }}>
+                        {Object.entries(event.args)
+                          .filter(([key]) => key !== 'poolId')
+                          .map(([key, value]) => `${key}=${String(value).slice(0, 28)}`)
+                          .join('  ')}
+                      </span>
+                      <a
+                        className="dim"
+                        style={{ display: 'block', fontSize: 11 }}
+                        href={explorerTxUrl(event.txHash)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {shortHash(event.txHash)} ↗
+                      </a>
+                    </span>
+                    <span />
+                  </div>
+                ))
+              )}
             </div>
           </div>
 
@@ -94,44 +144,61 @@ export function StrategyDetail() {
             <div className="panel">
               <div className="panel-head">
                 <span className="label">Schedule</span>
+                <span className="live-dot">cron</span>
               </div>
               <div className="panel-body">
                 <dl className="kv">
-                  <dt>Cadence</dt>
-                  <dd>every {fmtDuration(strategy.intervalSec)}</dd>
+                  <dt>Job id</dt>
+                  <dd>{strategy.jobId ?? '-'}</dd>
+                  <dt>Interval</dt>
+                  <dd>{strategy.cron ? `${strategy.cron.intervalSec}s` : strategy.intervalSec ? `${strategy.intervalSec}s` : '-'}</dd>
                   <dt>Next run</dt>
-                  <dd>
-                    {strategy.status === 'live' ? `in ${fmtDuration(strategy.nextRunSec)}` : 'not scheduled'}
-                  </dd>
-                  <dt>Fee</dt>
-                  <dd>{strategy.feeBps} bps on fills</dd>
-                  <dt>Gas spent</dt>
-                  <dd>{strategy.gasAse.toFixed(2)} ASE</dd>
-                  <dt>Pool</dt>
-                  <dd className="mono">Auras · {strategy.pair}</dd>
+                  <dd>{nextRunLabel(strategy.cron)}</dd>
+                  <dt>Gas escrow</dt>
+                  <dd>{strategy.cron ? `${weiToAse(strategy.cron.gasEscrow, 4)} ASE` : '-'}</dd>
+                  <dt>Runs left</dt>
+                  <dd>{strategy.cron?.runsLeft ?? '-'}</dd>
                 </dl>
               </div>
             </div>
 
             <div className="panel">
               <div className="panel-head">
-                <span className="label">Execution log</span>
-                <span className="tape-live">live</span>
+                <span className="label">Verification</span>
               </div>
-              {executionLog.map((row) => (
-                <div className="log-row" key={row.txHash + row.block}>
-                  <span className="dim">#{row.block.toLocaleString('en-US')}</span>
-                  <span>
-                    {row.method}() <span className="dim">→ {row.result}</span>
-                    <span className="dim" style={{ display: 'block', fontSize: 11 }}>
-                      {shortHash(row.txHash)} · {row.gas}
-                    </span>
-                  </span>
-                  <span className="dim" style={{ fontSize: 11 }}>
-                    {fmtAge(row.block % 90)}
-                  </span>
-                </div>
-              ))}
+              <div className="panel-body">
+                <dl className="kv">
+                  <dt>On-chain</dt>
+                  <dd style={{ wordBreak: 'break-all' }}>{strategy.codeHash || '-'}</dd>
+                  <dt>Local BLAKE3</dt>
+                  <dd style={{ wordBreak: 'break-all' }}>{strategy.localHash}</dd>
+                  <dt>Verdict</dt>
+                  <dd>{strategy.verified ? 'match' : 'mismatch'}</dd>
+                </dl>
+                <p className="muted" style={{ marginTop: 16, fontSize: 13.5 }}>
+                  The source above was fetched with <code>eth_getCode</code>, hashed locally, and compared with the
+                  <code> codeHash</code> the contract stores. That is the whole verification story - no compiler,
+                  no submission form.
+                </p>
+              </div>
+            </div>
+
+            <div className="panel">
+              <div className="panel-head">
+                <span className="label">Venue</span>
+              </div>
+              <div className="panel-body">
+                <dl className="kv">
+                  <dt>Pool</dt>
+                  <dd>{strategy.poolId ? `Auras #${strategy.poolId}` : '-'}</dd>
+                  <dt>Pair</dt>
+                  <dd>{strategy.symbol ? `${strategy.symbol}/ASE` : '-'}</dd>
+                  <dt>Last signal</dt>
+                  <dd>{strategy.lastSignal ?? '-'}</dd>
+                  <dt>Signal block</dt>
+                  <dd>{strategy.lastSignalBlock?.toLocaleString('en-US') ?? '-'}</dd>
+                </dl>
+              </div>
             </div>
 
             <div className="panel">

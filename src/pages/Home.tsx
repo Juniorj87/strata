@@ -1,44 +1,57 @@
 import { Link } from 'react-router-dom';
-import { chainStats, strategies } from '../data/mock';
-import { fmtNum } from '../lib/format';
+import { useAsync } from '../lib/hooks';
+import { getHeads } from '../lib/rpc';
+import { loadPools, loadStrategies, loadTape } from '../lib/registry';
 import { CodeBlock } from '../components/CodeBlock';
+import { PoolGrid } from '../components/PoolGrid';
 import { StrategyCard } from '../components/StrategyCard';
 import { Tape } from '../components/Tape';
 
-const SNIPPET = `// A strategy is a contract. It schedules itself, then trades.
-export default class Twap {
-  init(pool, notionalWei) {
-    this.pool = pool;
-    this.notionalWei = BigInt(notionalWei);
+const SNIPPET = `// A strategy is a contract. It schedules itself, then reads the AMM.
+export default class Momentum {
+  init(poolId, token, thresholdBps) {
+    this.poolId = poolId;
+    this.token = token;
+    this.thresholdBps = BigInt(thresholdBps);
 
-    // The chain fires this every hour. No keeper. No server.
-    cron.schedule(this.address, 'tick', [], chain.timestamp + 3600, 3600, 0, 300000n);
+    // The chain fires this every minute. No keeper. No server.
+    const jobId = cron.schedule(this.address, 'tick', [], chain.timestamp + 60, 60, 0, 500000n);
+    storage.set('jobId', String(jobId));
   }
 
   async tick() {
-    await E(this.pool).swapExactIn(QUOTE_TOKEN, this.notionalWei / 6n);
-    emit('Leg', { filled: true });
+    // The AMM's own TWAP accumulator - no oracle contract needed.
+    const twap = JSON.parse(await E(AURAS).consult(this.poolId));
+    const drift = driftBps(twap);
+
+    if (drift > this.thresholdBps) emit('Signal', { signal: 'sell', driftBps: drift.toString() });
+    else emit('Signal', { signal: 'hold', driftBps: drift.toString() });
   }
 }`;
 
 const COMPARE: [string, string, string][] = [
   ['Where the logic lives', 'On a server you control', 'On chain, source published'],
-  ['Runs when your laptop sleeps', 'No', 'Yes — the chain fires it'],
-  ['Scheduler', 'cron job or bot keeper', 'Protocol-level cron'],
+  ['Runs when your laptop sleeps', 'No', 'Yes - the chain fires it'],
+  ['Scheduler', 'cron job or bot keeper', 'Protocol-level cron registry'],
   ['Cost to stay alive', 'Hosting + API keys', 'Gas escrow per job'],
-  ['Audit before you trust it', 'Ask the operator', 'Read the source in the explorer'],
+  ['Audit before you trust it', 'Ask the operator', 'Read the source, verify the hash'],
   ['Kill switch', 'Kill the process', 'Cancel the scheduled job'],
-  ['History', 'Off-chain, yours to trust', 'Every call is a transaction'],
+  ['Price data', 'Your API key, your risk', "The AMM's own TWAP accumulator"],
 ];
 
 export function Home() {
-  const featured = strategies.filter((s) => s.status === 'live').slice(0, 3);
+  const heads = useAsync(() => getHeads(), 4000);
+  const tape = useAsync(() => loadTape(10), 6000);
+  const pools = useAsync(() => loadPools(), 8000);
+  const strategies = useAsync(() => loadStrategies(), 15000);
+
+  const live = strategies.data ?? [];
 
   return (
     <>
       <section className="wrap hero">
         <div className="hero-copy">
-          <span className="label">Trading strategies as contracts</span>
+          <span className="label">Adaptive strategies as contracts</span>
           <h1 className="hero-title">
             Your strategy runs on the <em>chain</em>, not on a server.
           </h1>
@@ -55,41 +68,54 @@ export function Home() {
             </Link>
           </div>
           <p className="hero-note">
-            chain 1423 · 2s blocks · native ASE · built on the public Asentum testnet
+            chain 1423 · 2s blocks · native ASE · live data read straight from the chain
           </p>
         </div>
 
         <div className="hero-side">
-          <Tape />
+          <Tape rows={tape.data ?? []} />
         </div>
       </section>
 
       <section className="wrap">
         <div className="stat-strip">
           <div className="stat">
-            <div className="label">Block height</div>
-            <div className="stat-value">{fmtNum(chainStats.blockHeight)}</div>
-            <div className="stat-sub">finalised, ~2s apart</div>
+            <div className="label">Finalised height</div>
+            <div className="stat-value">{heads.data?.finalized.toLocaleString('en-US') ?? '-'}</div>
+            <div className="stat-sub">never changes, ~2s blocks</div>
           </div>
           <div className="stat">
-            <div className="label">Strategies live</div>
-            <div className="stat-value">{chainStats.strategiesLive}</div>
-            <div className="stat-sub">on-chain, all public</div>
+            <div className="label">Tip</div>
+            <div className="stat-value">{heads.data?.tip.toLocaleString('en-US') ?? '-'}</div>
+            <div className="stat-sub">~3 blocks ahead of finality</div>
           </div>
           <div className="stat">
-            <div className="label">Volume routed</div>
-            <div className="stat-value">{fmtNum(chainStats.volumeAse)} ASE</div>
-            <div className="stat-sub">through Auras pools</div>
+            <div className="label">Auras pools</div>
+            <div className="stat-value">{pools.data?.length ?? '-'}</div>
+            <div className="stat-sub">live reserves and TWAP</div>
           </div>
           <div className="stat">
-            <div className="label">Strategy calls</div>
-            <div className="stat-value">{fmtNum(chainStats.strategyTxs)}</div>
-            <div className="stat-sub">cron-fired transactions</div>
+            <div className="label">Strategies</div>
+            <div className="stat-value">{strategies.loading ? '…' : live.length}</div>
+            <div className="stat-sub">discovered on chain</div>
           </div>
         </div>
       </section>
 
-      <section className="wrap section" id="how">
+      <section className="wrap section">
+        <div className="section-head">
+          <div>
+            <span className="label">The venue</span>
+            <h2 className="section-title">Auras pools, read live.</h2>
+          </div>
+          <a className="link-arrow" href="https://auras.finance" target="_blank" rel="noreferrer">
+            Open Auras ↗
+          </a>
+        </div>
+        <PoolGrid pools={pools.data ?? []} />
+      </section>
+
+      <section className="wrap section">
         <div className="section-head">
           <div>
             <span className="label">How it works</span>
@@ -114,8 +140,8 @@ export function Home() {
             <div className="step-num">02 / DEPLOY</div>
             <h3>Source goes on chain</h3>
             <p>
-              Deployment uploads the source itself — it is what runs, forever. Anyone can read it in the explorer
-              and verify the hash before they fund it.
+              Deployment uploads the source itself - it is what runs, forever. Anyone can read it in the explorer
+              and verify the BLAKE3 hash before they fund it.
             </p>
           </div>
           <div className="step">
@@ -123,7 +149,7 @@ export function Home() {
             <h3>The chain fires it</h3>
             <p>
               <code>cron.schedule()</code> registers a job in the protocol registry. Every interval the chain
-              executes the call and settles the trade — no keeper, no server, no API keys to rotate.
+              executes the call and settles the trade - no keeper, no server, no API keys to rotate.
             </p>
           </div>
         </div>
@@ -141,7 +167,7 @@ export function Home() {
 
           <div className="panel">
             <div className="panel-head">
-              <span className="label">What you get instead</span>
+              <span className="label">What the chain gives you</span>
             </div>
             <div className="panel-body">
               <dl className="kv">
@@ -153,15 +179,18 @@ export function Home() {
                 <dd>gas escrow, prepaid</dd>
                 <dt>Audit</dt>
                 <dd>source + BLAKE3 hash on chain</dd>
-                <dt>Failure mode</dt>
-                <dd>job exhausts, funds stay yours</dd>
+                <dt>Price feed</dt>
+                <dd>AMM TWAP accumulator</dd>
                 <dt>Kill switch</dt>
                 <dd>cancel the job, refund escrow</dd>
               </dl>
               <p className="muted" style={{ marginTop: 18, fontSize: 14 }}>
-                The strategy contract calls into the AMM with <code>E(pool).swapExactIn(...)</code> — asynchronous,
-                so the call cannot be re-entered, and a failed leg reverts the whole tick.
+                Cross-contract calls are asynchronous, so a strategy cannot be re-entered mid-execution and a
+                failed leg reverts the whole tick.
               </p>
+              <Link className="link-arrow" to="/how" style={{ display: 'inline-block', marginTop: 14 }}>
+                Read the long version →
+              </Link>
             </div>
           </div>
         </div>
@@ -171,16 +200,37 @@ export function Home() {
         <div className="section-head">
           <div>
             <span className="label">Live strategies</span>
-            <h2 className="section-title">People already run these without a server.</h2>
+            <h2 className="section-title">Contracts that trade while you sleep.</h2>
           </div>
           <Link className="link-arrow" to="/strategies">
             View all strategies →
           </Link>
         </div>
 
+        {strategies.loading && (
+          <div className="grid grid-3">
+            <div className="skeleton" />
+            <div className="skeleton" />
+            <div className="skeleton" />
+          </div>
+        )}
+
+        {!strategies.loading && live.length === 0 && (
+          <div className="empty">
+            <h3>No strategy is deployed yet.</h3>
+            <p style={{ maxWidth: 480, margin: '0 auto 20px' }}>
+              The registry reads the chain directly. Deploy the first one and it shows up here - source, hash
+              verification, cron schedule and every fill.
+            </p>
+            <Link className="btn btn-primary" to="/deploy">
+              Deploy the first strategy
+            </Link>
+          </div>
+        )}
+
         <div className="grid grid-3">
-          {featured.map((s) => (
-            <StrategyCard key={s.id} strategy={s} />
+          {live.slice(0, 3).map((s) => (
+            <StrategyCard key={s.address} strategy={s} />
           ))}
         </div>
       </section>
@@ -223,8 +273,8 @@ export function Home() {
               Deploy one template, watch the chain run it for an hour.
             </h2>
             <p className="muted" style={{ maxWidth: 520, margin: '0 auto 26px' }}>
-              Templates for momentum, mean reversion, TWAP, grid and DCA. Your first strategy costs a few ASE in
-              gas and runs unattended.
+              Templates for momentum, mean reversion, TWAP, grid and DCA. The first one costs a few ASE in gas and
+              runs unattended.
             </p>
             <Link className="btn btn-primary" to="/deploy">
               Open the deployer

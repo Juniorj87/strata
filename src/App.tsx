@@ -4,6 +4,7 @@ import { Home } from './pages/Home';
 import { Strategies } from './pages/Strategies';
 import { StrategyDetail } from './pages/StrategyDetail';
 import { Deploy } from './pages/Deploy';
+import { How } from './pages/How';
 
 export default function App() {
   return (
@@ -11,8 +12,9 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/strategies" element={<Strategies />} />
-        <Route path="/strategies/:id" element={<StrategyDetail />} />
+        <Route path="/strategies/:address" element={<StrategyDetail />} />
         <Route path="/deploy" element={<Deploy />} />
+        <Route path="/how" element={<How />} />
         <Route path="*" element={<Home />} />
       </Routes>
     </Shell>

@@ -1,75 +1,66 @@
-import { useMemo, useState } from 'react';
-import { strategies } from '../data/mock';
-import type { Pair, StrategyStatus } from '../types';
+import { Link } from 'react-router-dom';
+import { useAsync } from '../lib/hooks';
+import { loadStrategies } from '../lib/registry';
 import { StrategyCard } from '../components/StrategyCard';
 
-const STATUSES: (StrategyStatus | 'all')[] = ['all', 'live', 'paused', 'ended'];
-const PAIRS: (Pair | 'all')[] = ['all', 'ASE/USD', 'AUR/ASE', 'ASE/aUSD', 'GRID/ASE'];
-const PAIR_LABEL: Record<string, string> = { all: 'any pair' };
-
 export function Strategies() {
-  const [status, setStatus] = useState<StrategyStatus | 'all'>('all');
-  const [pair, setPair] = useState<Pair | 'all'>('all');
-  const [sort, setSort] = useState<'pnl' | 'trades' | 'new'>('pnl');
-
-  const list = useMemo(() => {
-    const filtered = strategies.filter(
-      (s) => (status === 'all' || s.status === status) && (pair === 'all' || s.pair === pair),
-    );
-    return [...filtered].sort((a, b) => {
-      if (sort === 'pnl') return b.pnlPct - a.pnlPct;
-      if (sort === 'trades') return b.trades - a.trades;
-      return a.deployedAgo.localeCompare(b.deployedAgo);
-    });
-  }, [status, pair, sort]);
+  const { data, loading, error, refresh } = useAsync(() => loadStrategies(), 15000);
+  const list = data ?? [];
 
   return (
     <>
       <section className="wrap detail-head">
         <span className="label">Registry</span>
         <h1 className="detail-title">Strategies on chain</h1>
-        <p className="section-note" style={{ maxWidth: 620 }}>
-          Every entry is a deployed contract with published source. P&amp;L is computed from on-chain fills, not
-          from a dashboard that can be edited.
+        <p className="section-note" style={{ maxWidth: 640 }}>
+          Every entry is read straight from the chain: the source is fetched from the node, hashed locally with
+          BLAKE3 and compared against the <code>codeHash</code> the contract stores. Nothing on this page is
+          editable.
         </p>
       </section>
 
       <section className="wrap" style={{ paddingBottom: 80 }}>
         <div className="filters">
-          {STATUSES.map((s) => (
-            <button
-              key={s}
-              className={`chip ${status === s ? 'on' : ''}`}
-              onClick={() => setStatus(s)}
-              type="button"
-            >
-              {s}
-            </button>
-          ))}
-          <span style={{ width: 12 }} />
-          {PAIRS.map((p) => (
-            <button key={p} className={`chip ${pair === p ? 'on' : ''}`} onClick={() => setPair(p)} type="button">
-              {PAIR_LABEL[p] ?? p}
-            </button>
-          ))}
-          <select className="select" value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-            <option value="pnl">sort: best P&amp;L</option>
-            <option value="trades">sort: most trades</option>
-            <option value="new">sort: newest</option>
-          </select>
+          <span className="live-dot">
+            {loading ? 'scanning the chain…' : `${list.length} found · chain 1423`}
+          </span>
+          <button className="chip" onClick={refresh} type="button" style={{ marginLeft: 'auto' }}>
+            refresh
+          </button>
         </div>
+
+        {error && (
+          <div className="notice" style={{ borderLeftColor: 'var(--down)' }}>
+            Chain read failed: {error}
+          </div>
+        )}
+
+        {loading && (
+          <div className="grid grid-3">
+            <div className="skeleton" />
+            <div className="skeleton" />
+            <div className="skeleton" />
+          </div>
+        )}
+
+        {!loading && list.length === 0 && (
+          <div className="empty">
+            <h3>Nothing deployed yet.</h3>
+            <p style={{ maxWidth: 460, margin: '0 auto 20px' }}>
+              Strata looks for contracts whose source carries the <code>Strata template</code> marker, plus any
+              address listed in <code>src/config/strategies.json</code>. Deploy one and it appears here.
+            </p>
+            <Link className="btn btn-primary" to="/deploy">
+              Deploy a strategy
+            </Link>
+          </div>
+        )}
 
         <div className="grid grid-3">
           {list.map((s) => (
-            <StrategyCard key={s.id} strategy={s} />
+            <StrategyCard key={s.address} strategy={s} />
           ))}
         </div>
-
-        {list.length === 0 && (
-          <p className="muted" style={{ padding: '40px 0' }}>
-            No strategy matches this filter yet.
-          </p>
-        )}
       </section>
     </>
   );

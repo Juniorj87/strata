@@ -163,7 +163,7 @@ export default class Grid {
 
 const DCA_SOURCE = `// Strata template: dca
 // Buys a fixed notional on every interval. The canonical "set and forget"
-// strategy — the chain is the scheduler.
+// strategy - the chain is the scheduler.
 
 export default class Dca {
   constructor() {
@@ -322,9 +322,9 @@ export const tape: TapeEntry[] = [
   { block: 118_204, strategy: 'Momentum 12/24', action: 'buy', amount: '250 ASE', price: '0.0412', txHash: '0x4c1f9a2b7e0d', ageSec: 6 },
   { block: 118_203, strategy: 'Mean Reversion Band', action: 'sell', amount: '180 ASE', price: '0.0938', txHash: '0x9ab3d05c821e', ageSec: 11 },
   { block: 118_201, strategy: 'Hourly DCA', action: 'buy', amount: '100 ASE', price: '0.0411', txHash: '0x77e0c4b13a9f', ageSec: 24 },
-  { block: 118_199, strategy: 'TWAP Slicer', action: 'hold', amount: '—', price: '0.1184', txHash: '0x2d8f61a04b7c', ageSec: 39 },
+  { block: 118_199, strategy: 'TWAP Slicer', action: 'hold', amount: '-', price: '0.1184', txHash: '0x2d8f61a04b7c', ageSec: 39 },
   { block: 118_197, strategy: 'Momentum 12/24', action: 'sell', amount: '250 ASE', price: '0.0408', txHash: '0xb52e77c19d40', ageSec: 58 },
-  { block: 118_194, strategy: 'Grid 25 / 5', action: 'deploy', amount: '—', price: '0.0410', txHash: '0x0a3f9e28c6b1', ageSec: 71 },
+  { block: 118_194, strategy: 'Grid 25 / 5', action: 'deploy', amount: '-', price: '0.0410', txHash: '0x0a3f9e28c6b1', ageSec: 71 },
   { block: 118_192, strategy: 'Mean Reversion Band', action: 'buy', amount: '180 ASE', price: '0.0921', txHash: '0xc7d41b6e09fa', ageSec: 88 },
   { block: 118_190, strategy: 'Hourly DCA', action: 'buy', amount: '100 ASE', price: '0.0409', txHash: '0x19b8e05c47d3', ageSec: 104 },
 ];
