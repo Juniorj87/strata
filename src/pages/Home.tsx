@@ -6,6 +6,7 @@ import { CodeBlock } from '../components/CodeBlock';
 import { PoolGrid } from '../components/PoolGrid';
 import { StrategyCard } from '../components/StrategyCard';
 import { Tape } from '../components/Tape';
+import { WalletConnectButton } from '../components/WalletConnectButton';
 
 const SNIPPET = `// A strategy is a contract. It schedules itself, then reads the AMM.
 export default class Momentum {
@@ -66,6 +67,7 @@ export function Home() {
             <Link className="btn btn-ghost" to="/strategies">
               Browse strategies
             </Link>
+            <WalletConnectButton />
           </div>
           <p className="hero-note">
             chain 1423 · 2s blocks · native ASE · live data read straight from the chain

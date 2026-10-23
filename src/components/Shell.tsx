@@ -1,5 +1,5 @@
 import { Link, NavLink } from 'react-router-dom';
-import { useWallet } from '@asentum/connect';
+import { ConnectModal, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
 import { getHeads } from '../lib/rpc';
 import { useTheme } from '../lib/theme';
@@ -37,23 +37,17 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </button>
             {wallet.connected && wallet.ase1Address ? (
               <a
-                className="mono"
-                style={{ fontSize: 12.5, color: 'var(--accent)', textDecoration: 'none' }}
+                className="mono wallet-chip"
                 href={`https://explorer.asentum.com/address/${wallet.ase1Address}`}
                 target="_blank"
                 rel="noreferrer"
                 title={wallet.ase1Address}
               >
-                {`${wallet.ase1Address.slice(0, 10)}…${wallet.ase1Address.slice(-4)}`}
+                ● {`${wallet.ase1Address.slice(0, 10)}…${wallet.ase1Address.slice(-4)}`}
               </a>
             ) : (
-              <button
-                className="theme-toggle"
-                onClick={() => wallet.openConnect()}
-                type="button"
-                style={{ color: 'var(--accent)', borderColor: 'var(--accent-line)' }}
-              >
-                {wallet.connecting ? 'Connecting…' : 'Connect'}
+              <button className="btn btn-primary btn-sm" onClick={() => wallet.openConnect()} type="button">
+                {wallet.connecting ? 'Connecting…' : 'Connect wallet'}
               </button>
             )}
           </nav>
@@ -62,7 +56,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
       <main>{children}</main>
 
-      <footer className="footer">
+      <ConnectModal />\n      <footer className="footer">
         <div className="wrap">
           <div className="footer-grid">
             <div className="footer-col">
@@ -100,7 +94,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
           <div className="footer-bottom">
-            <span>Community build on the Asentum testnet. Not affiliated with the Asentum team.</span>
+            <span>
+              Strata · trading strategies as contracts.
+            </span>
             <span className="mono">chain 1423 · ASE native</span>
           </div>
         </div>
