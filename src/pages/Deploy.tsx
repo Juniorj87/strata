@@ -191,9 +191,10 @@ export function Deploy() {
               </div>
 
               <p className="muted" style={{ fontSize: 13.5, marginTop: 16 }}>
-                The script needs a funded testnet key in <code>STRATA_SECRET_KEY</code>. It deploys, calls{' '}
-                <code>init</code>, arms the cron job, then prints the contract address and writes it into{' '}
-                <code>src/config/strategies.json</code> so this site picks it up on the next refresh.
+                The script needs a funded testnet seed in <code>STRATA_SEED</code> (or the auto-created{' '}
+                <code>.strata/seed.json</code>). It deploys, calls <code>init</code>, arms the cron job, then prints the
+                contract address and writes it into <code>src/config/strategies.json</code> so this site picks it up on
+                the next refresh.
               </p>
 
               <Link className="btn btn-ghost" to="/how" style={{ width: '100%', justifyContent: 'center', marginTop: 14 }}>

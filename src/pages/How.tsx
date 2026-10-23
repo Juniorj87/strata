@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { CodeBlock } from '../components/CodeBlock';
+import { Walkthrough } from '../components/Walkthrough';
 
 const CONTRACT = `// Strata template: momentum-signal
 //
@@ -164,6 +165,21 @@ export function How() {
           </div>
           <CodeBlock source={CONTRACT} />
         </div>
+      </section>
+
+      <section className="wrap section">
+        <div className="section-head">
+          <div>
+            <span className="label">Interactive walkthrough</span>
+            <h2 className="section-title">Run one tick yourself.</h2>
+          </div>
+        </div>
+        <p className="section-note" style={{ maxWidth: 640, marginBottom: 16 }}>
+          Every interval the chain fires <code>tick()</code>. The strategy reads the AMM's TWAP, compares the drift
+          with <code>thresholdBps</code> and emits exactly one signal. Tighten the threshold and watch <code>hold</code>{' '}
+          turn into <code>buy</code>/<code>sell</code>.
+        </p>
+        <Walkthrough />
       </section>
 
       <section className="wrap section">
