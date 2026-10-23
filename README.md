@@ -9,90 +9,72 @@ Strata is a community build on the Asentum testnet (chain 1423). Not affiliated 
 
 ---
 
-## Why this exists on Asentum
+## How it actually works on Asentum
 
-Asentum runs contracts in a hardened JavaScript sandbox and schedules them **at the protocol level**
-(`cron.schedule`), with a two-second block target. Cross-contract calls are asynchronous, so a
-strategy cannot be re-entered mid-execution.
+Auras (`AuraSwap` at `0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd`) already sweeps limit orders
+via the protocol cron, so Strata strategies are **adaptive**: the contract reads Auras' TWAP with
+`consult()`, makes its own decision every tick, and swaps through `swapExactIn` when its
+conditions hold. The chain fires the tick, no keeper exists.
 
-That combination makes a category possible which is awkward elsewhere:
+Two constraints worth knowing before deploying one:
 
-| | Off-chain bot | Strata (on-chain strategy) |
-|---|---|---|
-| Where the logic lives | On a server you control | On chain, source published |
-| Runs when your laptop sleeps | No | Yes — the chain fires it |
-| Scheduler | cron job or bot keeper | Protocol cron registry |
-| Cost to stay alive | Hosting + API keys | Gas escrow per job |
-| Audit before you trust it | Ask the operator | Read the source in the explorer |
-| Kill switch | Kill the process | Cancel the scheduled job |
-| History | Off-chain, yours to trust | Every call is a transaction |
+| | |
+|---|---|
+| Where the logic lives | On chain, source published in the explorer |
+| Scheduler | Protocol cron registry, funded by a gas escrow |
+| Which side it can trade | The **token side only**. Contracts receive `msg.value` only when funded; the strategy trades the ARC-20 leg and holds any native ASE it owns |
+| Deployment | Plain JS source, no compiler, verified locally by BLAKE3: `blake3(source)` must equal the on-chain `codeHash` |
 
-The same primitives are documented by the Asentum team in
-[Scheduled Contract Calls](https://www.asentum.com/docs/guides/scheduled-calls).
+## Templates
 
-## What a strategy contract looks like
+Five templates live in [`contracts/`](./contracts):
 
-```js
-// A strategy is a contract. It schedules itself, then trades.
-export default class Twap {
-  init(pool, notionalWei) {
-    this.pool = pool;
-    this.notionalWei = BigInt(notionalWei);
+- `auras-momentum-signal.js` - signal only, cheap to run, needs nothing but the cron escrow
+- `auras-momentum-trader.js` - trades the token side, must be funded with ARC-20 tokens
+- `twap.js`, `grid.js`, `dca.js` - execution styles on the same Auras interface
 
-    // The chain fires this every hour. No keeper. No server.
-    cron.schedule(this.address, 'tick', [], chain.timestamp + 3600, 3600, 0, 300000n);
-  }
+## Site
 
-  async tick() {
-    await E(this.pool).swapExactIn(QUOTE_TOKEN, this.notionalWei / 6n);
-    emit('Leg', { filled: true });
-  }
-}
-```
+- `/` - live pool states and the real swap tape, read straight from the chain
+- `/strategies` and `/strategies/:id` - on-chain registry: verified source (BLAKE3), cron job state, execution log
+- `/deploy` - pick a template, set parameters, get the exact `npm run deploy:...` command
+- `/how` - the model in detail, plus an interactive VM walkthrough
 
-Templates included: **momentum**, **mean reversion**, **TWAP**, **grid**, **DCA** — all five live in
-[`contracts/`](./contracts) as plain Asentum contract source, deployable with
-`asentum deploy contracts/twap.js --network testnet`.
-
-## Pages
-
-- `/` — what the model is, how it works, live strategy tape, bot-vs-contract comparison
-- `/strategies` — registry with filters and sorting
-- `/strategies/:id` — equity curve, on-chain source, schedule, execution log
-- `/deploy` — pick a template, set parameters, review the gas estimate
+Wallet connect (Chrome extension or Telegram bot wallet) is wired through `@asentum/connect` -
+the browser never holds a key, the wallet only signs.
 
 ## Run it
 
 ```bash
 npm install
-npm run dev      # http://127.0.0.1:5173
-npm run build    # production build
-npm run lint     # oxlint
+npm run dev            # http://127.0.0.1:5173
+npm run build          # production build
+npm run chain:check    # sanity-check every RPC surface the app uses
+npm run chain:verify   # BLAKE3 verification against the live Auras contract
 ```
 
-Stack: Vite + React + TypeScript, one hand-written CSS file, no UI framework, no chart library.
-TypeScript is required by the template — the app itself is plain React.
+## Deploying a strategy
 
-## Status
+The deployer script runs locally, generates a fresh deterministic-seed wallet (stored in
+git-ignored `.strata/seed.json`), and broadcasts to chain 1423:
 
-The interface is complete and runs on mock data (`src/data/mock.ts`). Everything marked
-**demo mode** in the deployer is simulated — no wallet is connected and nothing is broadcast.
+```bash
+npm run deploy:momentum-signal -- --pool 1 --threshold 120 --interval 60
+```
 
-Next slices, in order:
+0. Fund the generated wallet (address is printed by the script). Faucet: airdrop.asentum.com.
+1. Run the deploy command. The script verifies after broadcasting: if the BLAKE3 hash of the
+   sent source differs from the on-chain `codeHash`, the strategy is flagged unverified in the
+   registry.
 
-1. Replace the mock registry with a JSON-RPC reader against `https://explorer.asentum.com`
-   (chain 1423) — contracts, events, cron jobs, balances.
-2. Read strategy source and `codeHash` straight from the explorer, so the source panel is the
-   deployed source rather than a copy.
-3. Sign the deploy with the Asentum wallet extension (`@asentum/connect`) and broadcast to
-   chain 1423.
-4. Index on-chain fills to compute P&L instead of trusting the dashboard.
+Trading templates additionally need the contract itself funded with ARC-20 tokens before its
+first fill succeeds - the signal-only template runs on the cron escrow alone.
 
 ## Design notes
 
 House style of the ecosystem: dark editorial, near-black canvas, one accent per product, mono for
 numbers. Explorer's green, Auras' violet and Asentum AI's blue were all taken, so Strata uses
-turquoise — which leaves green/red free to mean profit and loss.
+turquoise, which leaves green/red free to mean profit and loss.
 
 ## License
 
