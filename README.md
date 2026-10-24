@@ -4,6 +4,7 @@
 
 ### Trading strategies as contracts on Asentum
 
+[![Live](https://img.shields.io/badge/Live-strata-00d5c8?style=for-the-badge)](https://strata-inky-sigma.vercel.app)
 [![Chain](https://img.shields.io/badge/chain-1423_testnet-00d5c8?style=for-the-badge)](https://explorer.asentum.com)
 [![CI](https://img.shields.io/github/actions/workflow/status/Juniorj87/strata/ci.yml?style=for-the-badge&label=CI)](https://github.com/Juniorj87/strata/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
@@ -14,7 +15,7 @@
 **Write trading logic as a JavaScript contract, deploy it once, and let the chain schedule it.**
 The source is public, every fill is a transaction, and there is no bot process to keep alive.
 
-[How it works](#-how-it-works) · [Routes](#-routes) · [Architecture](#-architecture) · [Templates](#-strategy-templates) · [Deploy](#-deploy-a-strategy) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+[🚀 Live App](https://strata-inky-sigma.vercel.app) · [How it works](#-how-it-works) · [Routes](#-routes) · [Architecture](#-architecture) · [Templates](#-strategy-templates) · [Deploy](#-deploy-a-strategy) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 

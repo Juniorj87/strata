@@ -189,6 +189,16 @@ p {
   color: var(--text);
 }
 
+.nav .gh-link {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+}
+
+.nav .gh-link:hover {
+  color: var(--accent);
+}
+
 .nav a.active {
   position: relative;
 }
