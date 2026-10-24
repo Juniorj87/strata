@@ -31,32 +31,48 @@ export interface PoolInfo {
   reserveNative: string;
 }
 
-export const POOLS: PoolInfo[] = [
-  {
-    id: '1',
-    token: '0xc24044dccea3ba8b362e1c85fa16ddc658022269',
-    symbol: 'AURA',
-    name: 'Aura',
-    reserveToken: '832689731462089743152',
-    reserveNative: '171441925602917698645697',
-  },
-  {
-    id: '2',
-    token: '0xbea7c12cba13eddd8e8ad77ff8f62fcf27736d20',
-    symbol: 'NOVA',
-    name: 'Nova',
-    reserveToken: '831821779013194807993799',
-    reserveNative: '59892421084978638180624',
-  },
-  {
-    id: '3',
-    token: '0x50cb8d861050ad0052959e0f942c5347842346f1',
-    symbol: 'PULSE',
-    name: 'Pulse',
-    reserveToken: '1103142267473304347767424',
-    reserveNative: '53673354430004961587263',
-  },
-];
+let _poolsCache: PoolInfo[] | null = null;
+
+/** Load every Auras pool that currently has liquidity, with token symbols. */
+export async function fetchPools(): Promise<PoolInfo[]> {
+  if (_poolsCache) return _poolsCache;
+  const out: PoolInfo[] = [];
+  let i = 1;
+  let consecutiveNulls = 0;
+  while (consecutiveNulls < 12 && i < 5000) {
+    const batch = Array.from({ length: 40 }, (_, k) => i + k);
+    const results = await Promise.all(
+      batch.map(async (id) => {
+        try {
+          const raw = await viewCall<string>(AURAS, 'getPool', [String(id)]);
+          if (!raw) return null;
+          const p = JSON.parse(raw) as { id: string; token0: string; token1: string; reserve0: string; reserve1: string; feeBps: string };
+          return p;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const p of results) {
+      if (!p) { consecutiveNulls += 1; continue; }
+      consecutiveNulls = 0;
+      if (BigInt(p.reserve0) <= 0n || BigInt(p.reserve1) <= 0n) continue;
+      let symbol = '?';
+      try { symbol = await viewCall<string>(p.token0, 'symbol', []); } catch { /* keep '?' */ }
+      out.push({
+        id: p.id,
+        token: p.token0,
+        symbol,
+        name: symbol,
+        reserveToken: p.reserve0,
+        reserveNative: p.reserve1,
+      });
+    }
+    i += batch.length;
+  }
+  _poolsCache = out;
+  return out;
+}
 
 export interface Heads {
   finalized: number;

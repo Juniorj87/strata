@@ -1,0 +1,16 @@
+# Code Owners for Strata
+
+# Maintainers
+* @Juniorj87
+
+# Documentation
+docs/ @Juniorj87
+
+# Smart Contracts
+contracts/ @Juniorj87
+
+# Web Application
+src/ @Juniorj87
+
+# Deployment Scripts
+scripts/ @Juniorj87

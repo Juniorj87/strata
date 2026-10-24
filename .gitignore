@@ -7,10 +7,23 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies
 node_modules
+.pnp
+.pnp.js
+
+# Build outputs
 dist
 dist-ssr
 *.local
+build
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # Editor directories and files
 .vscode/*
@@ -25,3 +38,12 @@ dist-ssr
 
 # Strata signing seed (never commit)
 .strata/
+
+# Testing
+coverage
+.nyc_output
+
+# Misc
+.cache
+.temp
+*.pid

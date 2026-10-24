@@ -1,6 +1,6 @@
 import {
   AURAS,
-  POOLS,
+  fetchPools,
   consult,
   findRecentDeployments,
   getAccountMeta,
@@ -124,7 +124,7 @@ export async function loadStrategy(address: string, discovery: 'configured' | 's
     deployBlock,
     poolId,
     token,
-    symbol: poolId ? (POOLS.find((p) => p.id === poolId)?.symbol ?? null) : null,
+    symbol: poolId ? ((await fetchPools()).find((p) => p.id === poolId)?.symbol ?? null) : null,
     intervalSec,
     jobId,
     cron: cronJob
@@ -200,6 +200,7 @@ export async function loadTape(limit = 12): Promise<TapeRow[]> {
   // 60 blocks is roughly two minutes of activity; wider windows pull tens of
   // thousands of logs at full-chain throughput and time out the browser.
   const logs = await getLogs(AURAS, Math.max(0, tip - 60)).catch(() => []);
+  const pools = await fetchPools();
   const rows: TapeRow[] = [];
 
   for (const log of logs) {
@@ -209,7 +210,7 @@ export async function loadTape(limit = 12): Promise<TapeRow[]> {
     rows.push({
       block: log.blockNumber,
       pool: poolId,
-      symbol: POOLS.find((p) => p.id === poolId)?.symbol ?? '?',
+      symbol: pools.find((p) => p.id === poolId)?.symbol ?? '?',
       tokenIn: String(args.tokenIn),
       amountIn: String(args.amountIn ?? '0'),
       amountOut: String(args.amountOut ?? '0'),
@@ -235,7 +236,8 @@ export interface LivePool {
 
 export async function loadPools(): Promise<LivePool[]> {
   const out: LivePool[] = [];
-  for (const pool of POOLS) {
+  const pools = await fetchPools();
+  for (const pool of pools) {
     const [onChain, twap, spot] = await Promise.all([
       getPool(pool.id),
       consult(pool.id).catch(() => null),

@@ -7,7 +7,7 @@ import './styles.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AsentumProvider rpc="https://testnet.asentum.com" dappName="Strata">
+    <AsentumProvider rpc="https://testnet.asentum.com" dappName="Strata" telegramBot="AsentumWalletBot">
       <BrowserRouter>
         <App />
       </BrowserRouter>

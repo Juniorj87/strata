@@ -21,7 +21,6 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <div className="wrap topbar-inner">
           <Link to="/" className="brand">
             <span className="brand-mark">STRATA</span>
-            <span className="brand-tag">on asentum</span>
           </Link>
           <nav className="nav">
             {nav.map((item) => (
@@ -56,7 +55,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
       <main>{children}</main>
 
-      <ConnectModal />\n      <footer className="footer">
+      <ConnectModal />
+      <footer className="footer">
         <div className="wrap">
           <div className="footer-grid">
             <div className="footer-col">

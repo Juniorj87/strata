@@ -1,0 +1,497 @@
+// AuraSwap: constant-product (x*y=k) AMM for AsentumChain.
+//
+//   1. TWAP oracle: price accumulators updated on every interaction; no
+//      separate oracle contract.
+//   2. On-chain limit orders filled by the chain cron. An order escrows its
+//      input; sweepOrders(), invoked by the cron registry on a schedule,
+//      fills any order whose current AMM output clears its minimum.
+//
+// A pool side is either native ASE or an ARC-20 token. Native ASE moves via
+// msg.value in and the transfer() builtin out; its sentinel is NATIVE below
+// and it needs no approve. ARC-20 sides move via E(token).transferFrom to
+// pull and E(token).transfer to pay, and require a prior approve().
+//
+// self: cached at init from msg.contractAddress so cron-invoked methods
+// (msg.sender = chain) can reference this contract's holdings.
+//
+// Storage layout:
+//   self                  this contract's 0x address (cached at init)
+//   poolCount             number of pools created (decimal string)
+//   orderCount            number of limit orders created (decimal string)
+//   pendingOrders         JSON array of open order ids (the cron work-list)
+//   pool:<id>             JSON Pool (see makePool)
+//   pair:<t0>:<t1>        pool id for a token pair (canonical ordering)
+//   order:<id>            JSON Order
+//   share:<pid>:<addr>    LP shares held by addr in pool pid (decimal string)
+
+const FEE_DENOM = 10000n;          // fee is expressed in basis points
+const DEFAULT_FEE_BPS = 30n;       // 0.30% default
+const SCALE = 1000000000000000000n; // 1e18 fixed-point for prices/TWAP
+const MAX_SWEEP = 20n;             // max limit orders filled per cron tick (gas bound)
+const ZERO = '0x0000000000000000000000000000000000000000';
+// Sentinel for the native ASE side of a pool (EIP-7528 style).
+const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+
+// ── helpers ────────────────────────────────────────────────────────────
+function isAddr(a) {
+  return typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a);
+}
+function lc(a) {
+  return String(a).toLowerCase();
+}
+// Integer square root (Babylonian) over BigInt — for initial LP shares.
+function sqrtBig(y) {
+  if (y < 2n) return y;
+  let z = y;
+  let x = y / 2n + 1n;
+  while (x < z) { z = x; x = (y / x + x) / 2n; }
+  return z;
+}
+// Canonical pair key so (A,B) and (B,A) map to the same pool.
+function pairKey(a, b) {
+  const [x, y] = a < b ? [a, b] : [b, a];
+  return 'pair:' + x + ':' + y;
+}
+
+({
+  // One-shot at deploy. Caches this contract's own address so cron-fired
+  // methods can pull/hold tokens even though msg.sender is then the chain.
+  init() {
+    assert(!storage.get('self'), 'already initialised');
+    storage.set('self', lc(msg.contractAddress));
+    storage.set('poolCount', '0');
+    storage.set('orderCount', '0');
+    storage.set('pendingOrders', '[]');
+    emit('Initialised', { self: lc(msg.contractAddress) });
+    return true;
+  },
+
+  // ── pools ────────────────────────────────────────────────────────────
+
+  // Create an empty pool for a token pair. feeBps defaults to 30 (0.30%).
+  createPool(token0, token1, feeBps) {
+    const t0 = lc(token0);
+    const t1 = lc(token1);
+    assert(isAddr(t0) && isAddr(t1), 'invalid token address');
+    assert(t0 !== t1, 'identical tokens');
+    const pk = pairKey(t0, t1);
+    assert(!storage.get(pk), 'pool exists');
+
+    const fee = feeBps === undefined || feeBps === null ? DEFAULT_FEE_BPS : BigInt(feeBps);
+    assert(fee >= 0n && fee < FEE_DENOM, 'fee out of range');
+
+    const id = (BigInt(storage.get('poolCount')) + 1n).toString();
+    const pool = {
+      id,
+      token0: t0,
+      token1: t1,
+      reserve0: '0',
+      reserve1: '0',
+      totalShares: '0',
+      feeBps: fee.toString(),
+      // TWAP accumulators: cumulative price*dt.
+      price0Cumulative: '0',
+      price1Cumulative: '0',
+      lastTs: chain.blockTimestamp.toString(),
+    };
+    storage.set('pool:' + id, JSON.stringify(pool));
+    storage.set(pk, id);
+    storage.set('poolCount', id);
+    emit('PoolCreated', { poolId: id, token0: t0, token1: t1, feeBps: fee.toString() });
+    return id;
+  },
+
+  // ── liquidity ────────────────────────────────────────────────────────
+
+  // Add liquidity. Caller must have approve()d this contract on BOTH
+  // tokens for at least amount0 / amount1. Shares minted:
+  //   first provider:  sqrt(amount0 * amount1)
+  //   thereafter:      min(amount0 * total / reserve0, amount1 * total / reserve1)
+  addLiquidity(poolId, amount0, amount1) {
+    const pool = _loadPool(poolId);
+    const sender = lc(msg.sender);
+    const a0 = BigInt(amount0);
+    const a1 = BigInt(amount1);
+    assert(a0 > 0n && a1 > 0n, 'amounts must be positive');
+
+    _accrueTwap(pool);
+
+    const r0 = BigInt(pool.reserve0);
+    const r1 = BigInt(pool.reserve1);
+    const total = BigInt(pool.totalShares);
+
+    let minted;
+    if (total === 0n) {
+      minted = sqrtBig(a0 * a1);
+      assert(minted > 0n, 'insufficient initial liquidity');
+    } else {
+      const s0 = (a0 * total) / r0;
+      const s1 = (a1 * total) / r1;
+      minted = s0 < s1 ? s0 : s1;
+      assert(minted > 0n, 'insufficient liquidity minted');
+    }
+
+    // Native side (if any) arrives as msg.value; ARC-20 sides are pulled
+    // via transferFrom (reverts atomically if not approved).
+    let nativeNeeded = 0n;
+    if (pool.token0 === NATIVE) nativeNeeded += a0;
+    if (pool.token1 === NATIVE) nativeNeeded += a1;
+    _takeValue(nativeNeeded);
+    _pull(pool.token0, sender, a0, false);
+    _pull(pool.token1, sender, a1, false);
+
+    pool.reserve0 = (r0 + a0).toString();
+    pool.reserve1 = (r1 + a1).toString();
+    pool.totalShares = (total + minted).toString();
+    storage.set('pool:' + pool.id, JSON.stringify(pool));
+
+    const key = 'share:' + pool.id + ':' + sender;
+    const cur = BigInt(storage.get(key) || '0');
+    storage.set(key, (cur + minted).toString());
+
+    emit('LiquidityAdded', {
+      poolId: pool.id, provider: sender,
+      amount0: a0.toString(), amount1: a1.toString(), shares: minted.toString(),
+    });
+    emit('Sync', { poolId: pool.id, reserve0: pool.reserve0, reserve1: pool.reserve1 });
+    return minted.toString();
+  },
+
+  // Burn `shares` and receive the proportional slice of both reserves.
+  removeLiquidity(poolId, shares) {
+    const pool = _loadPool(poolId);
+    const sender = lc(msg.sender);
+    const burn = BigInt(shares);
+    assert(burn > 0n, 'shares must be positive');
+
+    const key = 'share:' + pool.id + ':' + sender;
+    const held = BigInt(storage.get(key) || '0');
+    assert(held >= burn, 'insufficient shares');
+
+    _accrueTwap(pool);
+
+    const total = BigInt(pool.totalShares);
+    const r0 = BigInt(pool.reserve0);
+    const r1 = BigInt(pool.reserve1);
+    const out0 = (burn * r0) / total;
+    const out1 = (burn * r1) / total;
+    assert(out0 > 0n && out1 > 0n, 'nothing to withdraw');
+
+    pool.reserve0 = (r0 - out0).toString();
+    pool.reserve1 = (r1 - out1).toString();
+    pool.totalShares = (total - burn).toString();
+    storage.set('pool:' + pool.id, JSON.stringify(pool));
+    storage.set(key, (held - burn).toString());
+
+    _pay(pool.token0, sender, out0);
+    _pay(pool.token1, sender, out1);
+
+    emit('LiquidityRemoved', {
+      poolId: pool.id, provider: sender,
+      amount0: out0.toString(), amount1: out1.toString(), shares: burn.toString(),
+    });
+    emit('Sync', { poolId: pool.id, reserve0: pool.reserve0, reserve1: pool.reserve1 });
+    return JSON.stringify({ amount0: out0.toString(), amount1: out1.toString() });
+  },
+
+  // ── swaps ────────────────────────────────────────────────────────────
+
+  // Swap an exact amountIn of tokenIn for as much of the other token as the
+  // curve allows, reverting if output < minOut. Constant-product with fee.
+  swapExactIn(poolId, tokenIn, amountIn, minOut) {
+    const pool = _loadPool(poolId);
+    const sender = lc(msg.sender);
+    const tin = lc(tokenIn);
+    _takeValue(tin === NATIVE ? BigInt(amountIn) : 0n);
+    const out = _doSwap(pool, tin, BigInt(amountIn), BigInt(minOut), sender, sender);
+    return out.toString();
+  },
+
+  // Read-only: output for amountIn at current reserves (no state change).
+  quote(poolId, tokenIn, amountIn) {
+    const pool = _loadPool(poolId);
+    return _amountOut(pool, lc(tokenIn), BigInt(amountIn)).toString();
+  },
+
+  // ── limit orders ──────────────────────────────────────────────────────
+
+  // Post a limit order: swap amountIn of tokenIn, filled only when output
+  // reaches minOut. The input is escrowed now (pulled via transferFrom);
+  // the cron fills it when the curve clears minOut.
+  createLimitOrder(poolId, tokenIn, amountIn, minOut) {
+    const pool = _loadPool(poolId);
+    const sender = lc(msg.sender);
+    const tin = lc(tokenIn);
+    assert(tin === pool.token0 || tin === pool.token1, 'token not in pool');
+    const amt = BigInt(amountIn);
+    const min = BigInt(minOut);
+    assert(amt > 0n && min > 0n, 'amounts must be positive');
+
+    // Escrow the input: native arrives as msg.value, ARC-20 via transferFrom.
+    _takeValue(tin === NATIVE ? amt : 0n);
+    _pull(tin, sender, amt, false);
+
+    const id = (BigInt(storage.get('orderCount')) + 1n).toString();
+    const order = {
+      id, owner: sender, poolId: pool.id,
+      tokenIn: tin, amountIn: amt.toString(), minOut: min.toString(),
+      status: 'open', createdAt: chain.blockTimestamp.toString(),
+    };
+    storage.set('order:' + id, JSON.stringify(order));
+    storage.set('orderCount', id);
+
+    const pending = JSON.parse(storage.get('pendingOrders') || '[]');
+    pending.push(id);
+    storage.set('pendingOrders', JSON.stringify(pending));
+
+    emit('LimitOrderCreated', {
+      orderId: id, owner: sender, poolId: pool.id,
+      tokenIn: tin, amountIn: amt.toString(), minOut: min.toString(),
+    });
+    return id;
+  },
+
+  // Cancel an open order and refund the escrowed input to the owner.
+  cancelLimitOrder(orderId) {
+    const raw = storage.get('order:' + orderId);
+    assert(raw, 'no such order');
+    const order = JSON.parse(raw);
+    assert(order.status === 'open', 'order not open');
+    assert(lc(msg.sender) === order.owner, 'not order owner');
+
+    order.status = 'cancelled';
+    storage.set('order:' + orderId, JSON.stringify(order));
+    _removePending(orderId);
+    _pay(order.tokenIn, order.owner, BigInt(order.amountIn));
+    emit('LimitOrderCancelled', { orderId, owner: order.owner });
+    return true;
+  },
+
+  // Called by the chain's cron registry on a schedule (msg.sender = chain).
+  // Walks the open-order work-list and fills every order whose AMM output
+  // now clears its minOut, up to MAX_SWEEP per tick to bound gas.
+  sweepOrders() {
+    const pending = JSON.parse(storage.get('pendingOrders') || '[]');
+    if (pending.length === 0) return 0;
+
+    let filled = 0;
+    const remaining = [];
+    for (let i = 0; i < pending.length; i++) {
+      const id = pending[i];
+      if (BigInt(filled) >= MAX_SWEEP) { remaining.push(id); continue; }
+
+      const raw = storage.get('order:' + id);
+      if (!raw) continue; // vanished — drop from work-list
+      const order = JSON.parse(raw);
+      if (order.status !== 'open') continue;
+
+      const pool = _loadPool(order.poolId);
+      const out = _amountOut(pool, order.tokenIn, BigInt(order.amountIn));
+      if (out < BigInt(order.minOut)) { remaining.push(id); continue; }
+
+      // Fillable: execute the swap using the already-escrowed input. The
+      // input tokens are held by this contract, so payer = self.
+      const self = storage.get('self');
+      _doSwap(pool, order.tokenIn, BigInt(order.amountIn), BigInt(order.minOut), self, order.owner);
+      order.status = 'filled';
+      order.filledOut = out.toString();
+      order.filledAt = chain.blockTimestamp.toString();
+      storage.set('order:' + id, JSON.stringify(order));
+      emit('LimitOrderFilled', { orderId: id, owner: order.owner, amountOut: out.toString() });
+      filled++;
+    }
+    storage.set('pendingOrders', JSON.stringify(remaining));
+    return filled;
+  },
+
+  // ── LP positions (ERC-6909 / singleton style) ─────────────────────────
+  // Each pool's LP shares are a per-pool token id. Holders can transfer a
+  // position or approve a spender without a separate ERC-20 per pair.
+
+  // Move `amount` LP shares of a pool to another holder.
+  transferShares(poolId, to, amount) {
+    return _moveShares(String(poolId), lc(msg.sender), lc(to), BigInt(amount));
+  },
+
+  // Approve a spender to move up to `amount` of your LP shares in a pool.
+  approveShares(poolId, spender, amount) {
+    const owner = lc(msg.sender);
+    storage.set('lpallow:' + poolId + ':' + owner + ':' + lc(spender), BigInt(amount).toString());
+    emit('LPApproval', { poolId: String(poolId), owner, spender: lc(spender), value: BigInt(amount).toString() });
+    return true;
+  },
+
+  // Move shares on behalf of `from` (requires prior approveShares).
+  transferSharesFrom(poolId, from, to, amount) {
+    const pid = String(poolId);
+    const f = lc(from);
+    const spender = lc(msg.sender);
+    const amt = BigInt(amount);
+    const key = 'lpallow:' + pid + ':' + f + ':' + spender;
+    const allowed = BigInt(storage.get(key) || '0');
+    assert(allowed >= amt, 'insufficient LP allowance');
+    storage.set(key, (allowed - amt).toString());
+    return _moveShares(pid, f, lc(to), amt);
+  },
+
+  shareAllowance(poolId, owner, spender) {
+    return storage.get('lpallow:' + poolId + ':' + lc(owner) + ':' + lc(spender)) || '0';
+  },
+  // Total LP shares outstanding for a pool (the LP token's totalSupply).
+  poolShareSupply(poolId) {
+    const raw = storage.get('pool:' + String(poolId));
+    return raw ? JSON.parse(raw).totalShares : '0';
+  },
+  // A human label for the pool's LP token, for UIs: "AURA-dUSD LP".
+  lpSymbol(poolId) {
+    const raw = storage.get('pool:' + String(poolId));
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    return p.token0.slice(2, 6) + '-' + p.token1.slice(2, 6) + ' LP';
+  },
+
+  // ── views ────────────────────────────────────────────────────────────
+  getPool(poolId) { return storage.get('pool:' + poolId) || null; },
+  getOrder(orderId) { return storage.get('order:' + orderId) || null; },
+  poolForPair(tokenA, tokenB) { return storage.get(pairKey(lc(tokenA), lc(tokenB))) || null; },
+  sharesOf(poolId, addr) { return storage.get('share:' + poolId + ':' + lc(addr)) || '0'; },
+  openOrders() { return storage.get('pendingOrders') || '[]'; },
+
+  // Spot TWAP snapshot: the cumulative price accumulators + timestamp.
+  // A consumer samples this at two heights and divides the delta by the
+  // elapsed time to get the manipulation-resistant average price.
+  consult(poolId) {
+    const pool = _loadPool(poolId);
+    _accrueTwap(pool); // fold in time since last interaction (view-safe: not persisted)
+    return JSON.stringify({
+      price0Cumulative: pool.price0Cumulative,
+      price1Cumulative: pool.price1Cumulative,
+      lastTs: pool.lastTs,
+      reserve0: pool.reserve0,
+      reserve1: pool.reserve1,
+    });
+  },
+});
+
+// ── internal (module-scope) helpers ─────────────────────────────────────
+
+// Native vs ARC-20 token movement. NATIVE is the chain's own ASE: it comes
+// in as msg.value and goes out via the VM's transfer() builtin. ARC-20
+// sides move through cross-contract E() calls.
+function _pull(token, from, amt, payerIsSelf) {
+  if (token === NATIVE) return;      // native already credited via msg.value / escrow
+  if (payerIsSelf) return;           // ARC-20 escrow already held by this contract
+  E(token).transferFrom(lc(from), storage.get('self'), amt.toString());
+}
+function _pay(token, to, amt) {
+  if (token === NATIVE) transfer(lc(to), amt.toString());
+  else E(token).transfer(lc(to), amt.toString());
+}
+// Require the call carried at least `needed` native ASE; refund any surplus.
+function _takeValue(needed) {
+  const v = BigInt(msg.value || 0);
+  assert(v >= needed, 'insufficient native value sent');
+  const surplus = v - needed;
+  if (surplus > 0n) transfer(lc(msg.sender), surplus.toString());
+}
+
+function _loadPool(poolId) {
+  const raw = storage.get('pool:' + String(poolId));
+  assert(raw, 'no such pool');
+  return JSON.parse(raw);
+}
+
+// Fold elapsed time into the TWAP accumulators. Price is scaled by SCALE
+// (1e18). price0 = reserve1/reserve0 (token1 per token0), price1 = inverse.
+function _accrueTwap(pool) {
+  const now = chain.blockTimestamp;
+  const last = BigInt(pool.lastTs);
+  const dt = now - last;
+  if (dt <= 0n) return;
+  const r0 = BigInt(pool.reserve0);
+  const r1 = BigInt(pool.reserve1);
+  if (r0 > 0n && r1 > 0n) {
+    pool.price0Cumulative = (BigInt(pool.price0Cumulative) + (r1 * SCALE / r0) * dt).toString();
+    pool.price1Cumulative = (BigInt(pool.price1Cumulative) + (r0 * SCALE / r1) * dt).toString();
+  }
+  pool.lastTs = now.toString();
+}
+
+// Constant-product output for amountIn of tokenIn, net of fee. Pure.
+function _amountOut(pool, tokenIn, amtIn) {
+  if (amtIn <= 0n) return 0n;
+  const inIs0 = tokenIn === pool.token0;
+  assert(inIs0 || tokenIn === pool.token1, 'token not in pool');
+  const rin = BigInt(inIs0 ? pool.reserve0 : pool.reserve1);
+  const rout = BigInt(inIs0 ? pool.reserve1 : pool.reserve0);
+  if (rin === 0n || rout === 0n) return 0n;
+  const fee = BigInt(pool.feeBps);
+  const amtInAfterFee = amtIn * (FEE_DENOM - fee);
+  // out = (amtInAfterFee * rout) / (rin*FEE_DENOM + amtInAfterFee)
+  return (amtInAfterFee * rout) / (rin * FEE_DENOM + amtInAfterFee);
+}
+
+// Execute a swap against `pool`, moving amtIn of tokenIn from `payer` and
+// paying the output to `recipient`. Reverts if output < minOut. Updates
+// reserves + TWAP and persists the pool. Shared by swapExactIn (payer =
+// user) and sweepOrders (payer = this contract, holding escrow).
+function _doSwap(pool, tokenIn, amtIn, minOut, payer, recipient) {
+  assert(amtIn > 0n, 'amountIn must be positive');
+  const inIs0 = tokenIn === pool.token0;
+  assert(inIs0 || tokenIn === pool.token1, 'token not in pool');
+  const tokenOut = inIs0 ? pool.token1 : pool.token0;
+
+  _accrueTwap(pool);
+
+  const out = _amountOut(pool, tokenIn, amtIn);
+  assert(out >= minOut, 'insufficient output amount');
+  assert(out > 0n, 'zero output');
+
+  // Pull input from payer (native already credited via msg.value; ARC-20
+  // escrow for limit-order fills already sits in this contract).
+  _pull(tokenIn, payer, amtIn, payer === storage.get('self'));
+  // Pay output to the recipient.
+  _pay(tokenOut, recipient, out);
+
+  const r0 = BigInt(pool.reserve0);
+  const r1 = BigInt(pool.reserve1);
+  if (inIs0) {
+    pool.reserve0 = (r0 + amtIn).toString();
+    pool.reserve1 = (r1 - out).toString();
+  } else {
+    pool.reserve1 = (r1 + amtIn).toString();
+    pool.reserve0 = (r0 - out).toString();
+  }
+  storage.set('pool:' + pool.id, JSON.stringify(pool));
+
+  // Swap carries post-trade reserves so indexers derive price/TVL from one
+  // event; Sync provides reserves for reserve trackers.
+  emit('Swap', {
+    poolId: pool.id, payer, recipient,
+    tokenIn, amountIn: amtIn.toString(), tokenOut, amountOut: out.toString(),
+    reserve0: pool.reserve0, reserve1: pool.reserve1,
+    blockTimestamp: chain.blockTimestamp.toString(),
+  });
+  emit('Sync', { poolId: pool.id, reserve0: pool.reserve0, reserve1: pool.reserve1 });
+  return out;
+}
+
+function _removePending(orderId) {
+  const pending = JSON.parse(storage.get('pendingOrders') || '[]');
+  const next = pending.filter((x) => x !== String(orderId));
+  storage.set('pendingOrders', JSON.stringify(next));
+}
+
+// Move LP shares between holders (used by transferShares / transferSharesFrom).
+// Does not change the pool's totalShares — just reassigns ownership.
+function _moveShares(poolId, from, to, amount) {
+  assert(amount > 0n, 'amount must be positive');
+  const fk = 'share:' + poolId + ':' + from;
+  const tk = 'share:' + poolId + ':' + to;
+  const fb = BigInt(storage.get(fk) || '0');
+  assert(fb >= amount, 'insufficient LP shares');
+  storage.set(fk, (fb - amount).toString());
+  storage.set(tk, (BigInt(storage.get(tk) || '0') + amount).toString());
+  emit('LPTransfer', { poolId, from, to, value: amount.toString() });
+  return true;
+}
