@@ -6,7 +6,6 @@
  */
 import {
   AURAS,
-  fetchPools,
   consult,
   getAccountMeta,
   getContractSource,

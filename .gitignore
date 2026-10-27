@@ -47,3 +47,5 @@ coverage
 .cache
 .temp
 *.pid
+
+.vercel
