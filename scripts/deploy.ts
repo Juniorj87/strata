@@ -27,6 +27,10 @@ const POOL_TOKENS: Record<string, { token: string; symbol: string }> = {
 };
 
 const TEMPLATES: Record<string, { file: string; args: (a: Args) => string[] }> = {
+  'strata-hub': {
+    file: 'contracts/strata-hub.js',
+    args: () => [],
+  },
   'momentum-signal': {
     file: 'contracts/auras-momentum-signal.js',
     args: (a) => [a.pool, a.token, a.threshold, String(a.interval)],

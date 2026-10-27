@@ -7,6 +7,7 @@
 import {
   AURAS,
   consult,
+  fetchPools,
   getAccountMeta,
   getContractSource,
   getCronJob,
@@ -53,7 +54,10 @@ for (const [hex, ase] of Object.entries(EXPECTED)) {
   console.log(`bech32       ${hex} -> ${got} ${got === ase ? 'OK' : `MISMATCH (expected ${ase})`}`);
 }
 
-for (const pool of POOLS) {
+const pools = await fetchPools();
+console.log(`pools loaded ${pools.length} active pools`);
+
+for (const pool of pools.slice(0, 5)) {
   const onChain = await getPool(pool.id);
   const twap = await consult(pool.id);
   const out = await quote(pool.id, pool.token, '1000000000000000000');
@@ -68,8 +72,10 @@ console.log(`auras meta   codeHash=${meta.codeHash} exists=${meta.exists}`);
 const source = await getContractSource(AURAS);
 console.log(`auras source ${source.length} bytes, first line: ${source.split('\n')[0]}`);
 
-const tokenSymbol = await viewCall<string>(POOLS[0].token, 'symbol', []);
-console.log(`token        ${POOLS[0].token} symbol=${tokenSymbol}`);
+if (pools.length > 0) {
+  const tokenSymbol = await viewCall<string>(pools[0].token, 'symbol', []);
+  console.log(`token        ${pools[0].token} symbol=${tokenSymbol}`);
+}
 
 const job = await getCronJob('1');
 console.log(`cron job 1   ${job ? JSON.stringify(job).slice(0, 160) : 'none'}`);

@@ -2,10 +2,11 @@
 
 Strategy contracts for the Strata platform on the Asentum blockchain. These are written in plain JavaScript following the Asentum contract format - no compiler, no build pipeline required.
 
-## 📦 Available Templates
+## 📦 Available Templates & Protocol Contracts
 
-| Template | Logic | Execution Interval |
-|----------|-------|-------------------|
+| Template / Contract | Logic / Purpose | Execution Interval |
+|---|---|---|
+| `strata-hub.js` | **Protocol Hub & Registry:** canonical coordinator for strategies, escrow, and poke actions | Registry / On-demand |
 | `momentum.js` | Buys on upward momentum, sells on the drop | 60s |
 | `mean-reversion.js` | Sells into strength, buys back on weakness | 120s |
 | `twap.js` | Slices one order across N legs | 300s |
@@ -13,6 +14,14 @@ Strategy contracts for the Strata platform on the Asentum blockchain. These are 
 | `dca.js` | Fixed notional every interval | 3600s |
 | `auras-momentum-signal.js` | Reads TWAP, publishes buy/sell/hold signals | 60s |
 | `auras-momentum-trader.js` | Executes trades based on momentum signals | 60s |
+
+### 🏛️ Canonical Strata Hub (`strata-hub.js`)
+
+`StrataHub` serves as the central protocol gateway on the Asentum blockchain. It provides:
+1. **Strategy Registration:** Users register their deployed autonomous strategies via `registerStrategy(strategyAddress, templateName, poolId)`, emitting `StrategyRegistered`.
+2. **Escrow Management:** Users deposit or top up gas escrow via `depositEscrow(strategyAddress)` by sending native ASE (`msg.value`), emitting `EscrowDeposited`.
+3. **Execution Poking:** Any participant or decentralized keeper can manually poke a strategy tick via `pokeStrategy(strategyAddress)`, which invokes `E(strategy).tick()` and emits `StrategyPoked`.
+4. **Asentum Airdrop Ecosystem Program Integration:** Emits standardized indexed events that Asentum's testnet indexer tracks to attribute daily user tasks and airdrop XP directly to participating wallets.
 
 ## 🚀 Deployment
 
@@ -24,11 +33,15 @@ asentum deploy contracts/twap.js --network testnet
 
 Then call `init` with its arguments (see the header comment in each file), and fund the gas escrow so the scheduled job can keep firing.
 
-### Using the Web Deployer
+### Using the Deployment Scripts
 
-The Strata web application provides a UI for deploying strategies:
+Deploy individual strategies or the canonical protocol hub using npm scripts:
 
 ```bash
+# Deploy canonical protocol hub
+npm run deploy:hub
+
+# Deploy an autonomous strategy
 npm run deploy:momentum-signal -- --pool 1 --threshold 120 --interval 60
 ```
 
