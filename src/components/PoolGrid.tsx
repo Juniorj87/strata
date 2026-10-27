@@ -1,8 +1,17 @@
 import type { LivePool } from '../lib/registry';
 import { weiToAse } from '../lib/format';
 
-export function PoolGrid({ pools }: { pools: LivePool[] }) {
-  if (pools.length === 0) return null;
+export function PoolGrid({ pools, loading }: { pools: LivePool[]; loading?: boolean }) {
+  if (pools.length === 0) {
+    if (loading) {
+      return (
+        <div className="muted mono" style={{ padding: '32px 0', textAlign: 'center', fontSize: 13 }}>
+          Syncing live pool reserves from Auras AMM on chain…
+        </div>
+      );
+    }
+    return null;
+  }
 
   return (
     <div className="pool-grid">

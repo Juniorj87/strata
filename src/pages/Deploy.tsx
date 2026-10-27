@@ -15,7 +15,7 @@ export function Deploy() {
   const [interval, setInterval] = useState(templateById(params.get('template')).intervalSec);
   const [copied, setCopied] = useState(false);
 
-  const pools = useAsync(() => loadPools(), 10000);
+  const pools = useAsync(() => loadPools(), 20000);
   const template = templateById(templateId);
 
   const command = `npm run deploy:${template.id} -- --pool ${poolId} --threshold ${threshold} --size ${size} --interval ${interval}`;
@@ -79,7 +79,7 @@ export function Deploy() {
                       {p.symbol}/ASE · pool #{p.id}
                     </option>
                   ))}
-                  {pools.data?.length === 0 && <option value="1">Auras pool #1</option>}
+                  {(!pools.data || pools.data.length === 0) && <option value="1">AURA/ASE · pool #1</option>}
                 </select>
               </div>
               <div className="field">
@@ -137,10 +137,11 @@ export function Deploy() {
 
             {pools.data && pools.data.length > 0 && (
               <div className="panel" style={{ marginTop: 18 }}>
-                <div className="panel-head">
-                  <span className="label">Live pools</span>
+                <div className="panel-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span className="label">Live pairs ({pools.data.length})</span>
+                  <span className="mono dim" style={{ fontSize: 11 }}>Auras AMM</span>
                 </div>
-                <div className="panel-body">
+                <div className="panel-body" style={{ maxHeight: 340, overflowY: 'auto' }}>
                   <dl className="kv">
                     {pools.data.map((pool) => (
                       <div key={pool.id} style={{ display: 'contents' }}>

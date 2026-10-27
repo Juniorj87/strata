@@ -4,7 +4,7 @@
 
 ### Autonomous On-Chain Trading Strategies on Asentum
 
-[![Live App](https://img.shields.io/badge/Live%20App-strata--inky--sigma.vercel.app-00d5c8?style=for-the-badge&logo=vercel)](https://strata-inky-sigma.vercel.app)
+[![Live App](https://img.shields.io/badge/Live%20App-strata--dapp.vercel.app-00d5c8?style=for-the-badge&logo=vercel)](https://strata-dapp.vercel.app)
 [![Chain](https://img.shields.io/badge/Chain-Asentum%201423%20Testnet-00d5c8?style=for-the-badge)](https://explorer.asentum.com)
 [![Architecture](https://img.shields.io/badge/Architecture-100%25%20Decentralized%20·%20No%20Backend-8957e5?style=for-the-badge)](#-security--privacy)
 [![Privacy](https://img.shields.io/badge/Privacy-Zero%20Data%20Collection-green?style=for-the-badge)](#-privacy-and-user-protection)
@@ -15,7 +15,7 @@
 **Strata** is an autonomous trading protocol where strategies run directly on the blockchain as smart contracts rather than fragile off-chain bots.
 Deployed once, scheduled by the blockchain protocol itself, and verified through public on-chain source code.
 
-[🌐 Open Web App](https://strata-inky-sigma.vercel.app) · [Protocol Contracts](#-system-contracts--network) · [How It Works](#-how-it-works) · [Trading Mechanisms](#-core-mechanisms) · [Security & Privacy](#-privacy-and-user-protection)
+[🌐 Open Web App](https://strata-dapp.vercel.app) · [Protocol Contracts](#-system-contracts--network) · [How It Works](#-how-it-works) · [Trading Mechanisms](#-core-mechanisms) · [Security & Privacy](#-privacy-and-user-protection)
 
 </div>
 
@@ -116,7 +116,7 @@ Strata supports multiple algorithmic models deployed as autonomous contracts:
 
 ## 🖥️ Web Application Features
 
-The live application at [**strata-inky-sigma.vercel.app**](https://strata-inky-sigma.vercel.app) provides a comprehensive terminal for on-chain automated strategies:
+The live application at [**strata-dapp.vercel.app**](https://strata-dapp.vercel.app) provides a comprehensive terminal for on-chain automated strategies:
 
 ### 1. Live Dashboard & AMM Tape
 - Real-time block heights (finalized head and tip).

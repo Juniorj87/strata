@@ -17,6 +17,7 @@ export function useAsync<T>(loader: () => Promise<T>, intervalMs = 0, enabled = 
   const [loading, setLoading] = useState(enabled);
   const [tick, setTick] = useState(0);
   const alive = useRef(true);
+  const activeReq = useRef(0);
 
   useEffect(() => {
     alive.current = true;
@@ -27,25 +28,25 @@ export function useAsync<T>(loader: () => Promise<T>, intervalMs = 0, enabled = 
 
   useEffect(() => {
     if (!enabled) return;
-    let cancelled = false;
+    const reqId = ++activeReq.current;
 
     loader()
       .then((result) => {
-        if (cancelled || !alive.current) return;
-        setData(result);
-        setError(null);
+        if (!alive.current) return;
+        if (reqId === activeReq.current) {
+          setData(result);
+          setError(null);
+        } else {
+          setData((prev) => (prev === null ? result : prev));
+        }
       })
       .catch((err: unknown) => {
-        if (cancelled || !alive.current) return;
+        if (!alive.current || reqId !== activeReq.current) return;
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => {
-        if (!cancelled && alive.current) setLoading(false);
+        if (alive.current && reqId === activeReq.current) setLoading(false);
       });
-
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, enabled]);
 

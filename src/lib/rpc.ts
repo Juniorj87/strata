@@ -29,49 +29,114 @@ export interface PoolInfo {
   name: string;
   reserveToken: string;
   reserveNative: string;
+  feeBps?: string;
+  price0Cumulative?: string;
+  lastTs?: string;
 }
 
+const _symbolCache = new Map<string, string>();
 let _poolsCache: PoolInfo[] | null = null;
+let _fetchingPoolsPromise: Promise<PoolInfo[]> | null = null;
 
 /** Load every Auras pool that currently has liquidity, with token symbols. */
-export async function fetchPools(): Promise<PoolInfo[]> {
-  if (_poolsCache) return _poolsCache;
-  const out: PoolInfo[] = [];
-  let i = 1;
-  let consecutiveNulls = 0;
-  while (consecutiveNulls < 12 && i < 5000) {
-    const batch = Array.from({ length: 40 }, (_, k) => i + k);
-    const results = await Promise.all(
-      batch.map(async (id) => {
-        try {
-          const raw = await viewCall<string>(AURAS, 'getPool', [String(id)]);
-          if (!raw) return null;
-          const p = JSON.parse(raw) as { id: string; token0: string; token1: string; reserve0: string; reserve1: string; feeBps: string };
-          return p;
-        } catch {
-          return null;
+export async function fetchPools(forceRefresh = false): Promise<PoolInfo[]> {
+  if (!forceRefresh && _poolsCache) return _poolsCache;
+  if (_fetchingPoolsPromise) return _fetchingPoolsPromise;
+
+  _fetchingPoolsPromise = (async () => {
+    try {
+      const out: PoolInfo[] = [];
+      let i = 1;
+      let consecutiveNulls = 0;
+      while (consecutiveNulls < 12 && i < 1000) {
+        const batch = Array.from({ length: 40 }, (_, k) => i + k);
+        const results = await Promise.all(
+          batch.map(async (id) => {
+            try {
+              const raw = await viewCall<string>(AURAS, 'getPool', [String(id)]);
+              if (!raw) return null;
+              const p = JSON.parse(raw) as {
+                id: string;
+                token0: string;
+                token1: string;
+                reserve0: string;
+                reserve1: string;
+                feeBps?: string;
+                price0Cumulative?: string;
+                lastTs?: string;
+              };
+              return p;
+            } catch {
+              return null;
+            }
+          }),
+        );
+
+        const valid: NonNullable<(typeof results)[number]>[] = [];
+        for (const p of results) {
+          if (!p) {
+            consecutiveNulls += 1;
+            continue;
+          }
+          consecutiveNulls = 0;
+          if (BigInt(p.reserve0 || 0) <= 0n || BigInt(p.reserve1 || 0) <= 0n) continue;
+          valid.push(p);
         }
-      }),
-    );
-    for (const p of results) {
-      if (!p) { consecutiveNulls += 1; continue; }
-      consecutiveNulls = 0;
-      if (BigInt(p.reserve0) <= 0n || BigInt(p.reserve1) <= 0n) continue;
-      let symbol = '?';
-      try { symbol = await viewCall<string>(p.token0, 'symbol', []); } catch { /* keep '?' */ }
-      out.push({
-        id: p.id,
-        token: p.token0,
-        symbol,
-        name: symbol,
-        reserveToken: p.reserve0,
-        reserveNative: p.reserve1,
+
+        // Fetch any un-cached symbols in parallel
+        const unknownTokens = [
+          ...new Set(valid.map((p) => p.token0.toLowerCase())),
+        ].filter((t) => !_symbolCache.has(t));
+
+        if (unknownTokens.length > 0) {
+          await Promise.all(
+            unknownTokens.map(async (t) => {
+              try {
+                const sym = await viewCall<string>(t, 'symbol', []);
+                _symbolCache.set(t, sym || '?');
+              } catch {
+                _symbolCache.set(t, '?');
+              }
+            }),
+          );
+        }
+
+        for (const p of valid) {
+          const symbol = _symbolCache.get(p.token0.toLowerCase()) || '?';
+          out.push({
+            id: p.id,
+            token: p.token0,
+            symbol,
+            name: symbol,
+            reserveToken: p.reserve0,
+            reserveNative: p.reserve1,
+            feeBps: p.feeBps ?? '30',
+            price0Cumulative: p.price0Cumulative ?? '0',
+            lastTs: p.lastTs ?? '0',
+          });
+        }
+
+        i += batch.length;
+      }
+
+      // Sort pools by native ASE liquidity descending (deepest pools first)
+      out.sort((a, b) => {
+        try {
+          const diff = BigInt(b.reserveNative) - BigInt(a.reserveNative);
+          return diff > 0n ? 1 : diff < 0n ? -1 : 0;
+        } catch {
+          return 0;
+        }
       });
+
+      _poolsCache = out;
+      return out;
+    } finally {
+      _fetchingPoolsPromise = null;
     }
-    i += batch.length;
-  }
-  _poolsCache = out;
-  return out;
+  })();
+
+  return _fetchingPoolsPromise;
 }
 
 export interface Heads {

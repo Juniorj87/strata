@@ -1,7 +1,6 @@
 import {
   AURAS,
   fetchPools,
-  consult,
   findRecentDeployments,
   getAccountMeta,
   getBalance,
@@ -9,10 +8,8 @@ import {
   getCronJob,
   getHeads,
   getLogs,
-  getPool,
   getReceipt,
   hashSource,
-  quote,
   toAse1,
 } from './rpc';
 import configured from '../config/strategies.json';
@@ -234,26 +231,32 @@ export interface LivePool {
   twapTs: string;
 }
 
-export async function loadPools(): Promise<LivePool[]> {
-  const out: LivePool[] = [];
-  const pools = await fetchPools();
-  for (const pool of pools) {
-    const [onChain, twap, spot] = await Promise.all([
-      getPool(pool.id),
-      consult(pool.id).catch(() => null),
-      quote(pool.id, pool.token, '1000000000000000000').catch(() => '0'),
-    ]);
-    out.push({
-      id: pool.id,
-      symbol: pool.symbol,
-      name: pool.name,
-      token: pool.token,
-      reserveToken: onChain?.reserve0 ?? '0',
-      reserveNative: onChain?.reserve1 ?? '0',
-      spot,
-      feeBps: onChain?.feeBps ?? '30',
-      twapTs: twap?.lastTs ?? '',
-    });
+/** Calculate spot quote in ASE for 1 token (1e18) using Auras constant product math */
+export function computeSpot(reserveToken: string, reserveNative: string, feeBps = '30'): string {
+  try {
+    const r0 = BigInt(reserveToken);
+    const r1 = BigInt(reserveNative);
+    if (r0 <= 0n || r1 <= 0n) return '0';
+    const fee = BigInt(feeBps);
+    const amt = 1000000000000000000n; // 1 token
+    const amtWithFee = amt * (10000n - fee);
+    return ((amtWithFee * r1) / (r0 * 10000n + amtWithFee)).toString();
+  } catch {
+    return '0';
   }
-  return out;
+}
+
+export async function loadPools(): Promise<LivePool[]> {
+  const pools = await fetchPools();
+  return pools.map((pool) => ({
+    id: pool.id,
+    symbol: pool.symbol,
+    name: pool.name,
+    token: pool.token,
+    reserveToken: pool.reserveToken,
+    reserveNative: pool.reserveNative,
+    spot: computeSpot(pool.reserveToken, pool.reserveNative, pool.feeBps ?? '30'),
+    feeBps: pool.feeBps ?? '30',
+    twapTs: pool.price0Cumulative ?? pool.lastTs ?? '',
+  }));
 }

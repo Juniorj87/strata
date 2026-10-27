@@ -43,7 +43,7 @@ const COMPARE: [string, string, string][] = [
 export function Home() {
   const heads = useAsync(() => getHeads(), 4000);
   const tape = useAsync(() => loadTape(10), 6000);
-  const pools = useAsync(() => loadPools(), 8000);
+  const pools = useAsync(() => loadPools(), 15000);
   const strategies = useAsync(() => loadStrategies(), 15000);
 
   const live = strategies.data ?? [];
@@ -114,7 +114,7 @@ export function Home() {
             Open Auras ↗
           </a>
         </div>
-        <PoolGrid pools={pools.data ?? []} />
+        <PoolGrid pools={pools.data?.slice(0, 12) ?? []} loading={pools.loading} />
       </section>
 
       <section className="wrap section">
