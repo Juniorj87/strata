@@ -17,6 +17,10 @@ Strategy contracts for the Strata platform on the Asentum blockchain. These are 
 
 ### 🏛️ Canonical Strata Hub (`strata-hub.js`)
 
+**Deployed Testnet Address:** [`ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut`](https://explorer.asentum.com/address/ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut)  
+**Deployer Wallet:** [`ase1aluuy3j3q0xc6dqmc5amjzn0x4tt9sl606h5et`](https://explorer.asentum.com/address/ase1aluuy3j3q0xc6dqmc5amjzn0x4tt9sl606h5et)  
+**Verified On-Chain BLAKE3 Hash:** `7e546e00801bae1e432d914d56b0e225c53e7e7a7274ce7cc5029c7b52b0f1dd`
+
 `StrataHub` serves as the central protocol gateway on the Asentum blockchain. It provides:
 1. **Strategy Registration:** Users register their deployed autonomous strategies via `registerStrategy(strategyAddress, templateName, poolId)`, emitting `StrategyRegistered`.
 2. **Escrow Management:** Users deposit or top up gas escrow via `depositEscrow(strategyAddress)` by sending native ASE (`msg.value`), emitting `EscrowDeposited`.

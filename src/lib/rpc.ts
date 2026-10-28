@@ -22,6 +22,9 @@ export const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 /** Protocol cron registry - pre-deployed system contract. */
 export const CRON_REGISTRY = '0x0000000000000000000000000000000000000006';
 
+/** Strata Hub - canonical protocol coordinator and registry. */
+export const STRATA_HUB = 'ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut';
+
 export interface PoolInfo {
   id: string;
   token: string;

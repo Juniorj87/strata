@@ -49,7 +49,8 @@ Strata interacts with the following verified protocol contracts on the **Asentum
 | **Auras AMM Contract** | [`0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd`](https://explorer.asentum.com/address/0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd) | Core decentralized exchange & TWAP oracle |
 | **Protocol Cron Registry** | `0x0000000000000000000000000000000000000006` | Built-in system contract for autonomous scheduling |
 | **Native ASE Sentinel** | `0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee` | Standard identifier for the native ASE asset leg |
-| **Strata Hub Registry** | [`contracts/strata-hub.js`](contracts/strata-hub.js) | Canonical protocol contract for strategy registration, escrow, and airdrop telemetry |
+| **Strata Hub Contract** | [`ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut`](https://explorer.asentum.com/address/ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut) | Canonical protocol contract for strategy registration, escrow, & airdrop telemetry |
+| **Protocol Deployer Wallet** | [`ase1aluuy3j3q0xc6dqmc5amjzn0x4tt9sl606h5et`](https://explorer.asentum.com/address/ase1aluuy3j3q0xc6dqmc5amjzn0x4tt9sl606h5et) | Official protocol treasury & deployer address on Asentum Testnet |
 
 ---
 
