@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import { ConnectModal, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
@@ -39,6 +40,33 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [theme, toggleTheme] = useTheme();
   const { data: heads } = useAsync(() => getHeads(), 5000);
   const wallet = useWallet();
+  const [isLocked, setIsLocked] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const checkLock = async () => {
+      if (typeof window !== 'undefined' && (window as any).asentum?.isUnlocked && wallet.connected) {
+        try {
+          const unlocked = await (window as any).asentum.isUnlocked();
+          if (active) setIsLocked(!unlocked);
+        } catch {
+          if (active) setIsLocked(false);
+        }
+      } else {
+        if (active) setIsLocked(false);
+      }
+    };
+    void checkLock();
+    window.addEventListener('focus', checkLock);
+    const interval = window.setInterval(() => {
+      void checkLock();
+    }, 2500);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', checkLock);
+      window.clearInterval(interval);
+    };
+  }, [wallet.connected]);
 
   return (
     <div className="app">
@@ -63,9 +91,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
                   href={`https://explorer.asentum.com/address/${wallet.ase1Address}`}
                   target="_blank"
                   rel="noreferrer"
-                  title={wallet.ase1Address}
+                  title={isLocked ? 'Wallet is locked in browser extension! Enter password in extension to unlock.' : wallet.ase1Address}
+                  style={isLocked ? { borderColor: '#eab308', color: '#eab308' } : undefined}
                 >
-                  ● {`${wallet.ase1Address.slice(0, 10)}…${wallet.ase1Address.slice(-4)}`}
+                  {isLocked ? '🔒' : '●'} {`${wallet.ase1Address.slice(0, 10)}…${wallet.ase1Address.slice(-4)}`}
                 </a>
                 <button
                   type="button"

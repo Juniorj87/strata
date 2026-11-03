@@ -279,6 +279,34 @@ export function Deploy() {
     }
   };
 
+  const [isWalletLocked, setIsWalletLocked] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const checkLock = async () => {
+      if (typeof window !== 'undefined' && (window as any).asentum?.isUnlocked && wallet.connected) {
+        try {
+          const unlocked = await (window as any).asentum.isUnlocked();
+          if (active) setIsWalletLocked(!unlocked);
+        } catch {
+          if (active) setIsWalletLocked(false);
+        }
+      } else {
+        if (active) setIsWalletLocked(false);
+      }
+    };
+    void checkLock();
+    window.addEventListener('focus', checkLock);
+    const interval = window.setInterval(() => {
+      void checkLock();
+    }, 2000);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', checkLock);
+      window.clearInterval(interval);
+    };
+  }, [wallet.connected]);
+
   const deployLite = async () => {
     setError('');
     setResultWarning('');
@@ -289,6 +317,20 @@ export function Deploy() {
     if (!wallet.connected || !wallet.address) {
       wallet.openConnect();
       return;
+    }
+
+    // Direct extension unlock check: if using browser extension, verify it is unlocked with password
+    if (typeof window !== 'undefined' && (window as any).asentum?.isUnlocked) {
+      try {
+        const unlocked = await (window as any).asentum.isUnlocked();
+        if (!unlocked) {
+          setIsWalletLocked(true);
+          setError('🔒 Asentum Wallet is locked in your browser. Click the Asentum icon in your browser toolbar (top right), enter your password to unlock it, and click Launch again.');
+          return;
+        }
+      } catch {
+        // non-blocking
+      }
     }
 
     // Pre-flight session check: ensure the wallet session is active and not locked/expired
@@ -665,7 +707,11 @@ export function Deploy() {
       setStepStatus('done');
       setStage('Deployment complete');
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      let msg = err instanceof Error ? err.message : String(err);
+      if (/session|expired|locked/i.test(msg)) {
+        setIsWalletLocked(true);
+        msg = 'Your Asentum Wallet extension is locked. Click the Asentum icon in your browser toolbar (top right), enter your password, and click "I unlocked it — Retry" below.';
+      }
       setError(msg);
       setStepError(msg);
       setStepStatus('error');
@@ -1222,8 +1268,22 @@ export function Deploy() {
                   <strong className="mono">~{escrow} ASE</strong>
                 </div>
 
-                <button className="btn btn-primary launch-btn" type="button" onClick={deployLite} disabled={launchDisabled}>
-                  {deploying ? 'Deploying & Initializing…' : wallet.connected ? `Launch ${activeBot.title} bot` : 'Connect wallet to launch'}
+                {isWalletLocked && (
+                  <div className="notice" style={{ borderColor: '#eab308', background: 'rgba(234, 179, 8, 0.08)', marginBottom: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 20 }}>🔒</span>
+                      <div>
+                        <strong style={{ color: '#eab308' }}>Asentum Wallet extension is locked</strong>
+                        <p style={{ margin: '3px 0 0', fontSize: 13, color: 'var(--text-muted)' }}>
+                          Click the <strong>Asentum icon</strong> in your browser toolbar (top right), enter your password to unlock it, and return here to launch.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <button className="btn btn-primary launch-btn" type="button" onClick={deployLite} disabled={launchDisabled || isWalletLocked}>
+                  {deploying ? 'Deploying & Initializing…' : !wallet.connected ? 'Connect wallet to launch' : isWalletLocked ? '🔒 Unlock wallet in browser to launch' : `Launch ${activeBot.title} bot`}
                 </button>
                 {stage && <div className="deploy-stage" role="status">{stage}</div>}
                 {error && <div className="notice deploy-error" role="alert">{error}</div>}
@@ -1471,8 +1531,8 @@ export function Deploy() {
                   <div className="template-name">Ready to deploy?</div>
                   <p className="muted" style={{ marginTop: 5 }}>Your wallet signs each step. No seed phrase or private key is requested by this page.</p>
                 </div>
-                <button className="btn btn-primary" type="button" onClick={deployLite} disabled={launchDisabled}>
-                  {deploying ? 'Working…' : wallet.connected ? 'Deploy with wallet' : 'Connect wallet to deploy'}
+                <button className="btn btn-primary" type="button" onClick={deployLite} disabled={launchDisabled || isWalletLocked}>
+                  {deploying ? 'Working…' : !wallet.connected ? 'Connect wallet to deploy' : isWalletLocked ? '🔒 Unlock wallet in browser to deploy' : 'Deploy with wallet'}
                 </button>
                 {stage && <div className="deploy-stage" role="status">{stage}</div>}
                 {error && <div className="notice deploy-error" role="alert">{error}</div>}
@@ -1758,9 +1818,19 @@ export function Deploy() {
                 <strong style={{ color: '#ef4444' }}>Transaction halted:</strong>
                 <p style={{ margin: '4px 0 0', fontSize: 13 }}>{stepError}</p>
                 {/session|expired|locked/i.test(stepError) && (
-                  <p className="muted" style={{ margin: '8px 0 0', fontSize: 12 }}>
-                    If you paired via Telegram (@AsentumWalletBot), the session timed out or was disconnected. If using the Chrome Extension, ensure your wallet is unlocked. Click "Reconnect wallet" to refresh your session.
-                  </p>
+                  <div style={{ marginTop: 10, padding: '10px 12px', background: 'rgba(234, 179, 8, 0.12)', border: '1px solid rgba(234, 179, 8, 0.4)', borderRadius: 6 }}>
+                    <strong style={{ color: '#eab308', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      🔒 Wallet is locked in browser extension
+                    </strong>
+                    <p style={{ margin: '4px 0 0', fontSize: 12, lineHeight: 1.5 }}>
+                      The Asentum browser extension requires your password before signing transactions.
+                    </p>
+                    <ol style={{ margin: '6px 0 0', paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
+                      <li>Click the <strong>Asentum extension icon</strong> in your browser toolbar (top right).</li>
+                      <li>Enter your <strong>password</strong> to unlock the wallet.</li>
+                      <li>Click <strong>«🔓 I unlocked it — Retry»</strong> below.</li>
+                    </ol>
+                  </div>
                 )}
                 {resultAddress && (
                   <p className="muted" style={{ margin: '8px 0 0', fontSize: 12 }}>
@@ -1788,16 +1858,40 @@ export function Deploy() {
                     Close
                   </button>
                   {/session|expired|locked|reconnect/i.test(stepError) ? (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() => {
-                        setModalOpen(false);
-                        wallet.openConnect();
-                      }}
-                    >
-                      🔗 Reconnect wallet
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => {
+                          setModalOpen(false);
+                          wallet.openConnect();
+                        }}
+                      >
+                        🔗 Reconnect wallet
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={async () => {
+                          if (typeof window !== 'undefined' && (window as any).asentum?.isUnlocked) {
+                            try {
+                              const unlocked = await (window as any).asentum.isUnlocked();
+                              if (!unlocked) {
+                                setStepError('The Asentum extension is still locked. Please click the extension icon in your browser toolbar and enter your password.');
+                                return;
+                              }
+                            } catch {
+                              // non-blocking
+                            }
+                          }
+                          setStepError('');
+                          setError('');
+                          deployLite();
+                        }}
+                      >
+                        🔓 I unlocked it — Retry
+                      </button>
+                    </>
                   ) : (
                     <button type="button" className="btn btn-primary" onClick={deployLite}>
                       Retry deployment
