@@ -1827,8 +1827,16 @@ p {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 9999;
+  z-index: 500;
   padding: 16px;
+}
+
+/* Ensure Asentum ConnectModal (z-index 1000) always stays above all modal backdrops */
+div[style*="z-index: 1000"],
+div[style*="z-index: 1e3"],
+div[style*="z-index:1000"],
+div[style*="z-index:1e3"] {
+  z-index: 10000 !important;
 }
 .deploy-modal {
   background: var(--bg);

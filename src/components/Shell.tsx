@@ -57,15 +57,26 @@ export function Shell({ children }: { children: React.ReactNode }) {
               {theme === 'dark' ? 'Light' : 'Dark'}
             </button>
             {wallet.connected && wallet.ase1Address ? (
-              <a
-                className="mono wallet-chip"
-                href={`https://explorer.asentum.com/address/${wallet.ase1Address}`}
-                target="_blank"
-                rel="noreferrer"
-                title={wallet.ase1Address}
-              >
-                ● {`${wallet.ase1Address.slice(0, 10)}…${wallet.ase1Address.slice(-4)}`}
-              </a>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <a
+                  className="mono wallet-chip"
+                  href={`https://explorer.asentum.com/address/${wallet.ase1Address}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={wallet.ase1Address}
+                >
+                  ● {`${wallet.ase1Address.slice(0, 10)}…${wallet.ase1Address.slice(-4)}`}
+                </a>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => wallet.disconnect()}
+                  title="Disconnect wallet session"
+                  style={{ padding: '3px 8px', fontSize: 11, color: 'var(--down)', minHeight: 0, height: 26 }}
+                >
+                  Disconnect
+                </button>
+              </div>
             ) : (
               <button className="btn btn-primary btn-sm" onClick={() => wallet.openConnect()} type="button">
                 {wallet.connecting ? 'Connecting…' : 'Connect wallet'}

@@ -290,6 +290,25 @@ export function Deploy() {
       wallet.openConnect();
       return;
     }
+
+    // Pre-flight session check: ensure the wallet session is active and not locked/expired
+    if (typeof (client as any)?.checkSession === 'function') {
+      try {
+        const isLive = await (client as any).checkSession();
+        if (!isLive) {
+          setError('Your wallet session has expired or is locked. Please reconnect your wallet.');
+          wallet.openConnect();
+          return;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/session|expired|locked|not connected|permission/i.test(msg)) {
+          setError('Your wallet session has expired or is locked. Please reconnect your wallet.');
+          wallet.openConnect();
+          return;
+        }
+      }
+    }
     if (!selectedPool) {
       setError('Live Auras/AseDex pools are not available right now. Refresh the page and try again.');
       return;
@@ -1738,6 +1757,11 @@ export function Deploy() {
               <div className="notice" style={{ borderColor: '#ef4444', background: 'rgba(239, 68, 68, 0.08)', marginBottom: 16 }}>
                 <strong style={{ color: '#ef4444' }}>Transaction halted:</strong>
                 <p style={{ margin: '4px 0 0', fontSize: 13 }}>{stepError}</p>
+                {/session|expired|locked/i.test(stepError) && (
+                  <p className="muted" style={{ margin: '8px 0 0', fontSize: 12 }}>
+                    If you paired via Telegram (@AsentumWalletBot), the session timed out or was disconnected. If using the Chrome Extension, ensure your wallet is unlocked. Click "Reconnect wallet" to refresh your session.
+                  </p>
+                )}
                 {resultAddress && (
                   <p className="muted" style={{ margin: '8px 0 0', fontSize: 12 }}>
                     The contract was deployed at {shortAddr(resultAddress)} and is saved in your Portfolio.
@@ -1763,9 +1787,22 @@ export function Deploy() {
                   <button type="button" className="btn btn-ghost" onClick={() => setModalOpen(false)}>
                     Close
                   </button>
-                  <button type="button" className="btn btn-primary" onClick={deployLite}>
-                    Retry deployment
-                  </button>
+                  {/session|expired|locked|reconnect/i.test(stepError) ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => {
+                        setModalOpen(false);
+                        wallet.openConnect();
+                      }}
+                    >
+                      🔗 Reconnect wallet
+                    </button>
+                  ) : (
+                    <button type="button" className="btn btn-primary" onClick={deployLite}>
+                      Retry deployment
+                    </button>
+                  )}
                 </>
               ) : (
                 <button type="button" className="btn btn-ghost" disabled>
