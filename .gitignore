@@ -39,6 +39,11 @@ build
 # Strata signing seed (never commit)
 .strata/
 
+# Local archives and backup folders
+*.zip
+new version/
+
+
 # Testing
 coverage
 .nyc_output
@@ -49,3 +54,10 @@ coverage
 *.pid
 
 .vercel
+.env*
+
+# Local test and benchmark scripts
+scripts/test-*.mjs
+scripts/bench-*.mjs
+scripts/step-by-step.mjs
+scripts/get-asedex-source.mjs

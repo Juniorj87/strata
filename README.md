@@ -4,7 +4,7 @@
 
 ### Autonomous On-Chain Trading Strategies on Asentum
 
-[![Live App](https://img.shields.io/badge/Live%20App-strata--dapp.vercel.app-00d5c8?style=for-the-badge&logo=vercel)](https://strata-dapp.vercel.app)
+[![Live App](https://img.shields.io/badge/Live%20App-stratadex.site-00d5c8?style=for-the-badge&logo=vercel)](https://stratadex.site/)
 [![Chain](https://img.shields.io/badge/Chain-Asentum%201423%20Testnet-00d5c8?style=for-the-badge)](https://explorer.asentum.com)
 [![Architecture](https://img.shields.io/badge/Architecture-100%25%20Decentralized%20·%20No%20Backend-8957e5?style=for-the-badge)](#-security--privacy)
 [![Privacy](https://img.shields.io/badge/Privacy-Zero%20Data%20Collection-green?style=for-the-badge)](#-privacy-and-user-protection)
@@ -153,6 +153,35 @@ The live application at [**strata-dapp.vercel.app**](https://strata-dapp.vercel.
 | **Tamper Resistance** | Server owner can modify logic anytime | Code is immutable once deployed |
 | **Price Data Source** | External centralized APIs or private websockets | Auras AMM's native TWAP accumulators |
 | **Security Risk** | API keys and private keys stored on server | Non-custodial, no server keys exist |
+
+---
+
+## 🌐 Custom Domain Setup
+
+### Current Configuration
+
+**Domain:** `stratadex.site`
+
+**Status:** ✅ LIVE and working!
+
+**What was done:**
+1. Added domain `stratadex.site` to Vercel project via CLI
+2. Updated nameservers at domain registrar to:
+   - `ns1.vercel-dns.com`
+   - `ns2.vercel-dns.com`
+3. Vercel automatically configured DNS records (ALIAS to Vercel edge)
+4. Domain is now pointing to https://strata-dapp.vercel.app
+
+**Current state:**
+- ✅ Nameservers configured correctly
+- ✅ DNS records verified by Vercel
+- ✅ Domain alias pointing to production deployment
+- ✅ Site accessible at https://stratadex.site
+
+**Verification command:**
+```bash
+vercel domains inspect stratadex.site
+```
 
 ---
 

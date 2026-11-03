@@ -32,7 +32,7 @@ export function Tape({ rows }: { rows: TapeRow[] }) {
           <div className="tape-row" key={`${row.txHash}-${row.block}`}>
             <span className="tape-block">#{row.block.toLocaleString('en-US')}</span>
             <span className="tape-name">
-              {row.symbol}/ASE <span className={`tag ${nativeIn ? 'tag-sell' : 'tag-buy'}`}>{nativeIn ? 'buy' : 'sell'}</span>
+              {row.symbol}/ASE <span className={`tag ${nativeIn ? 'tag-buy' : 'tag-sell'}`}>{nativeIn ? 'buy' : 'sell'}</span>
             </span>
             <span className="tape-amt">
               {nativeIn ? weiToAse(row.amountIn, 3) : weiToAse(row.amountIn, 2)} {nativeIn ? 'ASE' : row.symbol}

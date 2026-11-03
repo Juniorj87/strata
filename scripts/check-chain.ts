@@ -67,10 +67,10 @@ for (const pool of pools.slice(0, 5)) {
 }
 
 const meta = await getAccountMeta(AURAS);
-console.log(`auras meta   codeHash=${meta.codeHash} exists=${meta.exists}`);
+console.log(`Auras AMM meta   codeHash=${meta.codeHash} exists=${meta.exists}`);
 
 const source = await getContractSource(AURAS);
-console.log(`auras source ${source.length} bytes, first line: ${source.split('\n')[0]}`);
+console.log(`Auras AMM source ${source.length} bytes, first line: ${source.split('\n')[0]}`);
 
 if (pools.length > 0) {
   const tokenSymbol = await viewCall<string>(pools[0].token, 'symbol', []);

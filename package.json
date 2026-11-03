@@ -12,11 +12,18 @@
     "chain:check": "node --experimental-strip-types scripts/check-chain.ts",
     "chain:verify": "node --experimental-strip-types scripts/check-verify.ts",
     "deploy:hub": "node --experimental-strip-types scripts/deploy.ts --template strata-hub",
+    "deploy:marketplace": "node --experimental-strip-types scripts/deploy.ts --template marketplace",
     "deploy:momentum-signal": "node --experimental-strip-types scripts/deploy.ts --template momentum-signal",
     "deploy:momentum-trader": "node --experimental-strip-types scripts/deploy.ts --template momentum-trader",
     "deploy:twap": "node --experimental-strip-types scripts/deploy.ts --template twap",
     "deploy:grid": "node --experimental-strip-types scripts/deploy.ts --template grid",
-    "deploy:dca": "node --experimental-strip-types scripts/deploy.ts --template dca"
+    "deploy:dca": "node --experimental-strip-types scripts/deploy.ts --template dca",
+    "deploy:risk-managed": "node --experimental-strip-types scripts/deploy.ts --template risk-managed",
+    "deploy:scale": "node --experimental-strip-types scripts/deploy.ts --template scale",
+    "deploy:limit-exit": "node --experimental-strip-types scripts/deploy.ts --template limit-exit",
+    "typecheck": "tsc -b --pretty",
+    "test:strategies": "node scripts/check-strategy-upgrades.mjs",
+    "test:trading": "node scripts/simulate-trading-lifecycle.mjs"
   },
   "dependencies": {
     "@asentum/connect": "^0.1.9",

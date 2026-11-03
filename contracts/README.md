@@ -1,132 +1,51 @@
-# Strategy Templates
+# Strata Strategy Contracts
 
-Strategy contracts for the Strata platform on the Asentum blockchain. These are written in plain JavaScript following the Asentum contract format - no compiler, no build pipeline required.
+These files use the current Asentum JavaScript contract format: a single source script whose last expression is a parenthesized object literal. Contract methods are synchronous. State is stored as strings through `storage`; cross-contract calls use `E(address).method(...)` and return directly.
 
-## 📦 Available Templates & Protocol Contracts
+## Templates
 
-| Template / Contract | Logic / Purpose | Execution Interval |
-|---|---|---|
-| `strata-hub.js` | **Protocol Hub & Registry:** canonical coordinator for strategies, escrow, and poke actions | Registry / On-demand |
-| `momentum.js` | Buys on upward momentum, sells on the drop | 60s |
-| `mean-reversion.js` | Sells into strength, buys back on weakness | 120s |
-| `twap.js` | Slices one order across N legs | 300s |
-| `grid.js` | Two-sided orders around a reference price | 60s |
-| `dca.js` | Fixed notional every interval | 3600s |
-| `auras-momentum-signal.js` | Reads TWAP, publishes buy/sell/hold signals | 60s |
-| `auras-momentum-trader.js` | Executes trades based on momentum signals | 60s |
+| Contract | Behaviour | Schedule | Trading |
+|---|---|---:|---|
+| `auras-momentum-signal.js` | Reads consecutive cumulative-TWAP windows and emits buy/sell/hold signals | Configurable, 60–86,400 seconds | No |
+| `auras-momentum-trader.js` | Sells a fixed ARC-20 token amount into ASE when upward TWAP drift exceeds the threshold | Configurable, minimum 60 seconds | Token → ASE only |
+| `grid.js` | Two-sided one-shot grid with separately funded ASE buy reserve and ARC-20 sell inventory | 60 seconds | ASE → token and token → ASE |
+| `twap.js` | Sells a total token amount over a finite number of timed slices | 300 seconds, finite slices | Token → ASE only |
+| `dca.js` | Recurring ASE-funded token purchases until the total budget is exhausted | Configurable, 60–86,400 seconds | ASE → token |
+| `strata-hub.js` | Registers strategies only after reading owner and template from the strategy contract | On demand | — |
 
-### 🏛️ Canonical Strata Hub (`strata-hub.js`)
+Grid uses one-time price levels around the deployment reference price. Each level executes at most once; it does not continuously recenter. DCA spends a prefunded ASE balance at the configured interval. Both use atomic Auras swaps and 2% minimum-output protection.
 
-**Deployed Testnet Address:** [`ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut`](https://explorer.asentum.com/address/ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut)  
-**Deployer Wallet:** [`ase1aluuy3j3q0xc6dqmc5amjzn0x4tt9sl606h5et`](https://explorer.asentum.com/address/ase1aluuy3j3q0xc6dqmc5amjzn0x4tt9sl606h5et)  
-**Verified On-Chain BLAKE3 Hash:** `7e546e00801bae1e432d914d56b0e225c53e7e7a7274ce7cc5029c7b52b0f1dd`
+## Network addresses
 
-`StrataHub` serves as the central protocol gateway on the Asentum blockchain. It provides:
-1. **Strategy Registration:** Users register their deployed autonomous strategies via `registerStrategy(strategyAddress, templateName, poolId)`, emitting `StrategyRegistered`.
-2. **Escrow Management:** Users deposit or top up gas escrow via `depositEscrow(strategyAddress)` by sending native ASE (`msg.value`), emitting `EscrowDeposited`.
-3. **Execution Poking:** Any participant or decentralized keeper can manually poke a strategy tick via `pokeStrategy(strategyAddress)`, which invokes `E(strategy).tick()` and emits `StrategyPoked`.
-4. **Asentum Airdrop Ecosystem Program Integration:** Emits standardized indexed events that Asentum's testnet indexer tracks to attribute daily user tasks and airdrop XP directly to participating wallets.
+- **Auras AMM:** `ase1v0myp2de3dhj3crvkhxqlnjaw2mvp64a9efkpl` / `0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd`
+- **AseDex Exchange:** `ase1cwpnkultxqjz9z09xwe7jlztw2uhuf8fklhzsm` / `0xc3833b73eb30242289e533b3e97c4b72b97e24e9`
+- **Cron Registry:** `ase1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqxgkr943` / `0x0000000000000000000000000000000000000006`
+- **Strata Hub:** `ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut`
 
-## 🚀 Deployment
+The AMM and AURA token are separate contracts. Strategy swaps, pool reads and quotes must target the AMM address.
 
-### Manual Deployment
+## Lifecycle and safety
 
-```bash
-asentum deploy contracts/twap.js --network testnet
+1. `init(...)` is guarded against repeat initialization and schedules `tick()` through the Cron Registry, forwarding the attached ASE as job escrow.
+2. Scheduled `tick()` methods require `msg.sender` to equal the Cron Registry. This prevents arbitrary wallets from directly triggering trades.
+3. Trading strategies approve the selected token to Auras and sell only the configured token amount. They stop the job when the remaining inventory cannot cover another trade; TWAP also stops when all configured slices are complete.
+4. Owners can call `stop()` to cancel an active cron job. If Cron has already removed it after escrow exhaustion, `stop()` still marks the strategy as stopped so the owner can recover remaining ARC-20. The registry refunds unspent escrow to the strategy contract. Owners can withdraw the strategy's ASE balance with `withdraw(to, amountWei)` and reclaim remaining ARC-20 with `withdrawTokens(to)` after stopping. Cron requires at least 60,000 ms between recurring runs and escrow sufficient for one run's gas limit.
+
+The actual swap call surface and each token's compatibility still require `validate_contract` / testnet simulation against the current Auras AMM source. A source hash match proves what code is deployed; it does not prove the strategy is economically safe or profitable.
+
+## Deploy
+
+```powershell
+npm ci
+npm run deploy:momentum-signal -- --pool 1 --token <TOKEN_HEX> --threshold 120 --interval 60 --escrow 0.05
+npm run deploy:grid -- --pool 1 --token <TOKEN_HEX> --size 250 --budget 5000 --decimals 18 --levels 5 --escrow 0.05
 ```
 
-Then call `init` with its arguments (see the header comment in each file), and fund the gas escrow so the scheduled job can keep firing.
+The CLI uses `.strata/seed.json` or `STRATA_SEED`. Keep the seed private and never put it in a shared archive.
 
-### Using the Deployment Scripts
+## Official references
 
-Deploy individual strategies or the canonical protocol hub using npm scripts:
-
-```bash
-# Deploy canonical protocol hub
-npm run deploy:hub
-
-# Deploy an autonomous strategy
-npm run deploy:momentum-signal -- --pool 1 --threshold 120 --interval 60
-```
-
-## 🔧 Contract Features
-
-### Asentum Blockchain Primitives
-
-Each template uses Asentum's built-in features:
-
-- **`cron.schedule()`** - Protocol-level job scheduling, no keeper required
-- **`E(addr).method(args)`** - Asynchronous cross-contract calls
-- **`emit(name, payload)`** - Indexed events for decision tracking
-- **BLAKE3 verification** - Source code hash stored on-chain
-
-### Key Characteristics
-
-- **Re-entry Safety** - Asynchronous calls prevent re-entrancy attacks
-- **Atomic Execution** - Failed legs revert the entire transaction
-- **Public Source** - Anyone can read and verify the code
-- **No Compilation** - Source code is the deployed artifact
-
-## ⚠️ Important Notes
-
-### Placeholder Addresses
-
-The constants `BASE`, `POOL_TOKEN`, and `QUOTE_TOKEN` are placeholders. You must replace them with real token addresses for the pool you trade before deployment.
-
-### Live Deployment Status
-
-These templates have not been deployed to mainnet yet. They are written against the documented VM globals but not exercised against a live node. We recommend:
-
-1. Test on testnet first
-2. Replace placeholder addresses
-3. Start with small amounts
-4. Monitor execution carefully
-
-### Funding Requirements
-
-- **Gas Escrow** - Pre-fund with ASE tokens for scheduled executions
-- **Trading Templates** - Also fund with ARC-20 tokens for trading
-- **Signal Templates** - Can run on gas escrow alone
-
-## 📚 Resources
-
-- [Asentum Contract Documentation](https://www.asentum.com/docs/guides/writing-contracts)
-- [Scheduled Calls Guide](https://www.asentum.com/docs/guides/scheduled-calls)
+- [Asentum Writing Contracts](https://www.asentum.com/docs/guides/writing-contracts)
+- [Asentum Scheduled Contract Calls](https://www.asentum.com/docs/guides/scheduled-calls)
+- [Auras ecosystem page](https://www.asentum.com/ecosystem/auras)
 - [Strata README](../README.md)
-- [Architecture Documentation](../docs/ARCHITECTURE.md)
-
-## 🔍 Contract Structure
-
-Each contract follows this pattern:
-
-```javascript
-// Configuration constants
-const PARAMETER = value;
-
-// Initialization
-function init() {
-  // Setup logic
-}
-
-// Main execution (called by cron)
-function tick() {
-  // Trading logic
-  emit('decision', { data });
-}
-```
-
-## 🤝 Contributing
-
-To add a new strategy template:
-
-1. Write the contract following the existing pattern
-2. Add comprehensive comments
-3. Include parameter documentation
-4. Update this README
-5. Test on testnet before submitting
-
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
-
----
-
-Built for the Asentum blockchain ecosystem

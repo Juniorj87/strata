@@ -32,11 +32,11 @@ export function StrategyCard({ strategy }: { strategy: LiveStrategy }) {
           <div className="metric-value">{strategy.trades}</div>
         </div>
         <div>
-          <div className="metric-label">Volume</div>
-          <div className="metric-value">{fmtWei(strategy.volumeWei, 2)}</div>
+          <div className="metric-label">Gross ASE received</div>
+          <div className="metric-value">{fmtWei(strategy.realisedWei, 2)}</div>
         </div>
         <div>
-          <div className="metric-label">Held</div>
+          <div className="metric-label">ASE balance</div>
           <div className="metric-value">{fmtWei(strategy.balanceAse, 2)}</div>
         </div>
       </div>
@@ -46,7 +46,7 @@ export function StrategyCard({ strategy }: { strategy: LiveStrategy }) {
           {countdown ? `next run ${countdown}` : strategy.intervalSec ? `every ${fmtDuration(strategy.intervalSec)}` : 'no cron'}
         </span>
         <span className={strategy.verified ? 'verify' : 'verify bad'}>
-          {strategy.verified ? 'hash ok' : 'hash ?'}
+          {strategy.verified ? 'source match' : 'unverified'}
         </span>
       </div>
     </Link>

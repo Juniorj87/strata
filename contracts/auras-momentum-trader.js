@@ -1,117 +1,198 @@
 // Strata template: momentum-trader
-//
-// Same signal as momentum-signal, but it executes: it sells the pool's ARC-20
-// token into ASE when the spot drifts above the threshold.
-//
-// Two constraints of the VM shape this contract:
-//
-//   1. E() carries no value, so a contract cannot open the NATIVE side of a
-//      swap - Auras reads msg.value for that side. The strategy therefore
-//      trades the token side, which the AMM pulls with transferFrom.
-//   2. That means the contract needs a token balance and an approve to Auras.
-//      The owner sends the tokens in once; the approve happens on the first
-//      tick and is good for a long while.
-//
-// Deploy with:
-//   init(poolId, token, thresholdBps, sizeWei, intervalSec)
+// Sells a fixed token amount into ASE on upward cumulative-TWAP drift.
+// One-sided strategy: it does not open a buy position.
+// init(poolId, token, thresholdBps, sizeWei, intervalSec, ammAddress)
 
-const AURAS = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
-const APPROVAL = 1000000n * 10n ** 18n; // one million tokens, one approve
+const AURAS_AMM = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+const ASEDEX_AMM = '0xc3833b73eb30242289e533b3e97c4b72b97e24e9';
+const CRON = '0x0000000000000000000000000000000000000006';
+const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 
-export default class MomentumTrader {
-  constructor() {
-    this.ticks = 0;
-  }
+function cronJobExists(jobId) {
+  const raw = E(CRON).getJob(jobId);
+  if (raw === null || raw === undefined) return false;
+  if (typeof raw === 'string') return JSON.parse(raw) !== null;
+  return true;
+}
+const SLIPPAGE_BPS = 200n;
 
-  init(poolId, token, thresholdBps, sizeWei, intervalSec) {
-    this.poolId = String(poolId);
-    this.token = String(token);
-    this.thresholdBps = BigInt(thresholdBps);
-    this.sizeWei = BigInt(sizeWei);
-    this.intervalSec = Number(intervalSec);
-    this.ticks = 0;
-    this.approved = false;
+function asObject(value) {
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
 
-    storage.set('owner', String(msg.sender));
+function consultPool(amm, poolId) {
+  try {
+    const raw = E(amm).consult(String(poolId));
+    if (raw) return asObject(raw);
+  } catch {}
+  return asObject(E(amm).getPool(String(poolId)));
+}
+
+function assertAsePool(poolId, token, ammAddress) {
+  const amm = ammAddress || AURAS_AMM;
+  const pool = asObject(E(amm).getPool(String(poolId)));
+  assert(pool && typeof pool === 'object', 'AMM pool not found');
+  const asset = String(token).toLowerCase();
+  const token0 = String(pool.token0 || '').toLowerCase();
+  const token1 = String(pool.token1 || '').toLowerCase();
+  assert((token0 === asset && token1 === NATIVE) || (token1 === asset && token0 === NATIVE), 'selected pool must pair this token directly with native ASE');
+  assert(BigInt(pool.reserve0 || '0') > 0n && BigInt(pool.reserve1 || '0') > 0n, 'pool has no liquidity');
+}
+function tokenCumulative(poolId, token, snapshot, ammAddress) {
+  const amm = ammAddress || AURAS_AMM;
+  const pool = asObject(E(amm).getPool(String(poolId)));
+  const asset = String(token).toLowerCase();
+  const token0 = String(pool.token0 || '').toLowerCase();
+  const token1 = String(pool.token1 || '').toLowerCase();
+  if (token0 === asset && token1 === NATIVE) return BigInt(snapshot.price0Cumulative);
+  if (token1 === asset && token0 === NATIVE) return BigInt(snapshot.price1Cumulative);
+  assert(false, 'selected pool must pair this token directly with native ASE');
+}
+
+function cancelFromTick(reason) {
+  E(CRON).cancel(storage.get('jobId'));
+  storage.set('stopped', 'true');
+  emit('AutoStopped', { reason, jobId: storage.get('jobId') || '' });
+}
+
+({
+  init(poolId, token, thresholdBps, sizeWei, intervalSec, ammAddress) {
+    assert(!storage.has('owner'), 'already initialised');
+    const interval = BigInt(intervalSec);
+    const threshold = BigInt(thresholdBps);
+    const size = BigInt(sizeWei);
+    assert(interval >= 60n && interval <= 86400n, 'interval must be 60..86400 seconds');
+    assert(threshold > 0n && threshold <= 10000n, 'threshold must be 1..10000 bps');
+    assert(size > 0n, 'size must be positive');
+    const amm = ammAddress || AURAS_AMM;
+    assertAsePool(poolId, token, amm);
+    assert(msg.value >= 900000n, 'cron escrow must cover at least one run (900000 wei)');
+
+    storage.set('owner', msg.sender);
+    storage.set('poolId', String(poolId));
+    storage.set('token', String(token));
+    storage.set('ammAddress', String(amm));
+    storage.set('thresholdBps', threshold.toString());
+    storage.set('sizeWei', size.toString());
+    storage.set('intervalSec', interval.toString());
+    storage.set('ticks', '0');
+    storage.set('approved', 'false');
+    storage.set('lastCumulative', '');
+    storage.set('lastTimestamp', '0');
+    storage.set('lastAverage', '0');
     storage.set('earned', '0');
+    storage.set('stopped', 'false');
 
-    const jobId = cron.schedule(
-      this.address,
-      'tick',
-      [],
-      chain.timestamp + this.intervalSec,
-      this.intervalSec,
-      0,
-      900000n,
-    );
+    emit('StrataDeploy', { owner: msg.sender, template: 'momentum-trader', poolId: String(poolId), intervalSec: interval.toString(), gasEscrowWei: msg.value.toString(), timestamp: chain.blockTimestamp.toString() });
+    const intervalMs = interval * 1000n;
+    const jobId = E(CRON, { value: msg.value }).schedule(msg.contractAddress, 'tick', [], (chain.blockTimestamp + intervalMs).toString(), intervalMs.toString(), '0', '900000');
     storage.set('jobId', String(jobId));
+    emit('Armed', { poolId: String(poolId), token: String(token), thresholdBps: threshold.toString(), sizeWei: size.toString(), intervalSec: interval.toString(), jobId: String(jobId) });
+    return String(jobId);
+  },
 
-    emit('Armed', {
-      poolId: this.poolId,
-      token: this.token,
-      thresholdBps: thresholdBps.toString(),
-      sizeWei: sizeWei.toString(),
-      intervalSec: String(this.intervalSec),
-      jobId: String(jobId),
-    });
-  }
+  tick() {
+    assert(msg.sender === CRON, 'only cron registry');
+    assert(storage.get('stopped') !== 'true', 'strategy stopped');
+    const ammAddress = storage.get('ammAddress') || AURAS_AMM;
+    const token = storage.get('token');
+    const poolId = storage.get('poolId');
+    const size = BigInt(storage.get('sizeWei'));
+    const tokenBalance = BigInt(E(token).balanceOf(msg.contractAddress));
+    if (tokenBalance < size) { cancelFromTick('token-allocation-below-next-order'); return 'stopped'; }
 
-  async tick() {
-    this.ticks += 1;
-
-    // One approve covers a long run; the AMM pulls with transferFrom.
-    if (!this.approved) {
-      await E(this.token).approve(AURAS, APPROVAL);
-      this.approved = true;
-      emit('Approved', { spender: AURAS, amount: APPROVAL.toString() });
+    if (storage.get('approved') !== 'true') {
+      E(token).approve(ammAddress, tokenBalance.toString());
+      storage.set('approved', 'true');
+      emit('Approved', { spender: ammAddress, amount: tokenBalance.toString() });
     }
 
-    const twap = JSON.parse(await E(AURAS).consult(this.poolId));
-    const drift = driftBps(twap);
-
-    if (drift <= this.thresholdBps) {
-      emit('Signal', { signal: 'hold', driftBps: drift.toString(), ticks: String(this.ticks) });
-      return;
+    const snapshot = consultPool(ammAddress, poolId);
+    const cumulative = tokenCumulative(poolId, token, snapshot, ammAddress);
+    const timestamp = BigInt(snapshot.lastTs);
+    const ticks = BigInt(storage.get('ticks') || '0') + 1n;
+    storage.set('ticks', ticks.toString());
+    const previousCumulative = storage.get('lastCumulative');
+    if (!previousCumulative) {
+      storage.set('lastCumulative', cumulative.toString());
+      storage.set('lastTimestamp', timestamp.toString());
+      emit('Signal', { signal: 'hold', reason: 'twap-warmup', ticks: ticks.toString() });
+      return 'warmup';
     }
 
-    // Quote first, then require the fill to clear a floor.
-    const expected = await E(AURAS).quote(this.poolId, this.token, this.sizeWei.toString());
-    const minOut = (BigInt(expected) * 98n) / 100n; // 2% slippage band
+    const elapsed = timestamp - BigInt(storage.get('lastTimestamp') || '0');
+    const delta = cumulative - BigInt(previousCumulative);
+    storage.set('lastCumulative', cumulative.toString());
+    storage.set('lastTimestamp', timestamp.toString());
+    if (elapsed <= 0n || delta <= 0n) {
+      emit('Signal', { signal: 'hold', reason: 'no-twap-window', ticks: ticks.toString() });
+      return 'no-window';
+    }
 
-    const out = await E(AURAS).swapExactIn(
-      this.poolId,
-      this.token,
-      this.sizeWei.toString(),
-      minOut.toString(),
-    );
+    const average = delta / elapsed;
+    const previousAverage = BigInt(storage.get('lastAverage') || '0');
+    if (previousAverage === 0n) {
+      storage.set('lastAverage', average.toString());
+      emit('Signal', { signal: 'hold', reason: 'twap-baseline', ticks: ticks.toString() });
+      return 'baseline';
+    }
+    const drift = ((average - previousAverage) * 10000n) / previousAverage;
+    storage.set('lastAverage', average.toString());
+    if (drift <= BigInt(storage.get('thresholdBps'))) {
+      emit('Signal', { signal: 'hold', driftBps: drift.toString(), twapPrice: average.toString(), ticks: ticks.toString() });
+      return 'hold';
+    }
 
-    const earned = BigInt(storage.get('earned') || '0') + BigInt(out);
+    const expected = BigInt(E(ammAddress).quote(poolId, token, size.toString()));
+    const minOut = (expected * (10000n - SLIPPAGE_BPS)) / 10000n;
+    const amountOut = BigInt(E(ammAddress).swapExactIn(poolId, token, size.toString(), minOut.toString()));
+    const earned = BigInt(storage.get('earned') || '0') + amountOut;
     storage.set('earned', earned.toString());
+    emit('Fill', { poolId, tokenIn: token, amountIn: size.toString(), amountOut: amountOut.toString(), driftBps: drift.toString() });
+    emit('Signal', { signal: 'sell', driftBps: drift.toString(), twapPrice: average.toString(), ticks: ticks.toString() });
 
-    emit('Fill', {
-      poolId: this.poolId,
-      tokenIn: this.token,
-      amountIn: this.sizeWei.toString(),
-      amountOut: out.toString(),
-      driftBps: drift.toString(),
-    });
-    emit('Signal', { signal: 'sell', driftBps: drift.toString(), ticks: String(this.ticks) });
-  }
+    const remaining = BigInt(E(token).balanceOf(msg.contractAddress));
+    if (remaining < size) cancelFromTick('token-allocation-exhausted');
+    return amountOut.toString();
+  },
 
-  // The ASE the strategy earned can be pulled out by its owner.
-  withdraw(to) {
-    assert(String(msg.sender) === storage.get('owner'), 'not the owner');
-    const amount = BigInt(storage.get('earned') || '0');
-    assert(amount > 0n, 'nothing earned yet');
-    storage.set('earned', '0');
-    transfer(to, amount.toString());
-    emit('Withdrawn', { to, amount: amount.toString() });
-  }
-}
+  stop() {
+    assert(msg.sender === storage.get('owner'), 'not the owner');
+    if (storage.get('stopped') !== 'true') {
+      const jobId = storage.get('jobId');
+      // Cron can remove an exhausted job and refund its remainder automatically.
+      // In that case there is nothing left to cancel, but the owner must still
+      // be able to mark the strategy stopped and recover its token inventory.
+      const active = Boolean(jobId && cronJobExists(jobId));
+      if (active) E(CRON).cancel(jobId);
+      storage.set('stopped', 'true');
+      emit('Stopped', { owner: msg.sender, jobId: jobId || '', cronJobActive: String(active) });
+    }
+    return true;
+  },
 
-function driftBps(twap) {
-  const reserve0 = BigInt(twap.reserve0);
-  const reserve1 = BigInt(twap.reserve1);
-  if (reserve0 === 0n || reserve1 === 0n) return 0n;
-  return ((reserve0 - reserve1) * 10000n) / reserve0;
-}
+  withdraw(to, amountWei) {
+    assert(msg.sender === storage.get('owner'), 'not the owner');
+    const amount = BigInt(amountWei);
+    assert(amount > 0n, 'amount must be positive');
+    transfer(to || msg.sender, amount);
+    emit('Withdrawn', { to: to || msg.sender, amount: amount.toString() });
+    return amount.toString();
+  },
+
+  withdrawTokens(to) {
+    assert(msg.sender === storage.get('owner'), 'not the owner');
+    assert(storage.get('stopped') === 'true', 'stop the strategy first');
+    const token = storage.get('token');
+    const amount = BigInt(E(token).balanceOf(msg.contractAddress));
+    assert(amount > 0n, 'no tokens to withdraw');
+    E(token).transfer(to || msg.sender, amount.toString());
+    emit('TokensWithdrawn', { token, to: to || msg.sender, amount: amount.toString() });
+    return amount.toString();
+  },
+
+  getOwner() { return storage.get('owner') || ''; },
+  getConfig() { return JSON.stringify({ version: '1', template: 'momentum-trader', poolId: storage.get('poolId'), token: storage.get('token'), thresholdBps: storage.get('thresholdBps'), sizeWei: storage.get('sizeWei'), intervalSec: storage.get('intervalSec'), ammAddress: storage.get('ammAddress') || AURAS_AMM }); },
+  getTemplate() { return 'momentum-trader'; },
+  getStatus() { return JSON.stringify({ owner: storage.get('owner'), template: 'momentum-trader', poolId: storage.get('poolId'), token: storage.get('token'), stopped: storage.get('stopped'), jobId: storage.get('jobId'), ticks: storage.get('ticks') || '0', earned: storage.get('earned') || '0', ammAddress: storage.get('ammAddress') || AURAS_AMM }); },
+});

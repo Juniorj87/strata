@@ -1,9 +1,15 @@
+import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
-import { loadStrategy } from '../lib/registry';
-import { explorerAddressUrl, explorerTxUrl } from '../lib/rpc';
+import { loadStrategy, type LiveStrategy } from '../lib/registry';
+import { explorerAddressUrl, explorerTxUrl, toAse1, toHexAddress } from '../lib/rpc';
 import { fmtDuration, fmtWei, shortHash, weiToAse } from '../lib/format';
 import { CodeBlock } from '../components/CodeBlock';
+import { MARKETPLACE_ADDRESS } from '../lib/marketplace';
+import { StrategyPnlPanel } from '../components/StrategyPnlPanel';
+import { botTypeFor } from '../lib/templates';
+import { getUserStrategies } from '../lib/userStrategies';
 
 function nextRunLabel(cron: { nextRunAt: string } | null): string {
   if (!cron?.nextRunAt) return 'not scheduled';
@@ -13,18 +19,149 @@ function nextRunLabel(cron: { nextRunAt: string } | null): string {
   return seconds > 0 ? `in ${fmtDuration(seconds)}` : 'due now';
 }
 
+function formatToken(raw: bigint, decimals: number, symbol: string): string {
+  const scale = 10n ** BigInt(decimals);
+  const whole = raw / scale;
+  const fraction = (raw % scale).toString().padStart(decimals, '0').slice(0, 6).replace(/0+$/, '');
+  return `${whole.toLocaleString('en-US')}${fraction ? `.${fraction}` : ''} ${symbol}`.trim();
+}
+
+interface FillRow {
+  key: string;
+  block: number;
+  side: 'Bought' | 'Sold';
+  amount: string;
+  ase: string;
+  txHash: string;
+}
+
+function buildFills(strategy: LiveStrategy): FillRow[] {
+  const tokenAddress = (strategy.token ?? '').toLowerCase();
+  if (!tokenAddress) return [];
+  return strategy.fillEvents
+    .slice()
+    .sort((a, b) => b.block - a.block)
+    .slice(0, 20)
+    .map((event) => {
+      const amountIn = BigInt(String(event.args.amountIn ?? '0'));
+      const amountOut = BigInt(String(event.args.amountOut ?? '0'));
+      const sold = String(event.args.tokenIn ?? '').toLowerCase() === tokenAddress;
+      const amount = sold ? amountIn : amountOut;
+      const ase = sold ? amountOut : amountIn;
+      return {
+        key: `${event.txHash}-${event.block}-${event.name}`,
+        block: event.block,
+        side: sold ? 'Sold' : 'Bought',
+        amount: strategy.tokenDecimals !== null
+          ? formatToken(amount, strategy.tokenDecimals, strategy.symbol ?? '')
+          : `${amount.toString()} raw`,
+        ase: fmtWei(ase, 4),
+        txHash: event.txHash,
+      } satisfies FillRow;
+    });
+}
+
 export function StrategyDetail() {
   const { address = '' } = useParams();
-  const { data: strategy, loading, error } = useAsync(
+  const wallet = useWallet();
+  const client = useAsentum();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionMessage, setActionMessage] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [marketTitle, setMarketTitle] = useState('');
+  const [marketDescription, setMarketDescription] = useState('');
+  const [marketTags, setMarketTags] = useState('');
+  const [marketStatus, setMarketStatus] = useState('');
+  const { data: strategy, loading, error, refresh } = useAsync(
     () => loadStrategy(address.toLowerCase()),
     12000,
     address.length > 0,
   );
 
-  if (loading) {
+  const userHex = wallet.address ? (() => { try { return toHexAddress(wallet.address).toLowerCase(); } catch { return wallet.address.toLowerCase(); } })() : '';
+  const userAse1 = wallet.ase1Address ? wallet.ase1Address.toLowerCase() : (userHex ? toAse1(userHex).toLowerCase() : '');
+
+  const userStrategies = wallet.address ? getUserStrategies(wallet.address) : [];
+  const localMatch = userStrategies.find(
+    (s) => s.address.toLowerCase() === address.toLowerCase()
+  );
+
+  const walletIsOwner = Boolean(
+    localMatch || (
+      strategy?.owner && (userHex || userAse1) && (() => {
+        const ownerLower = strategy.owner.toLowerCase();
+        try {
+          if (userHex && userHex === ownerLower) return true;
+          if (userAse1 && userAse1 === ownerLower) return true;
+          if (userAse1 && toHexAddress(userAse1).toLowerCase() === ownerLower) return true;
+          if (userHex && toAse1(userHex).toLowerCase() === ownerLower) return true;
+        } catch {
+          if (userHex === ownerLower || userAse1 === ownerLower) return true;
+        }
+        return false;
+      })()
+    )
+  );
+
+  const publishToMarketplace = async () => {
+    if (!strategy || !walletIsOwner || !MARKETPLACE_ADDRESS) return;
+    setActionBusy(true);
+    setMarketStatus('');
+    setActionError('');
+    try {
+      const title = marketTitle.trim() || strategy.name;
+      const txHash = await client.call(MARKETPLACE_ADDRESS, 'publishStrategy', [strategy.address, title, marketDescription.trim(), marketTags.trim()]);
+      const receipt = await client.waitReceipt(txHash, 120000);
+      if (!receipt.success) throw new Error('Marketplace publication reverted. Inspect the transaction receipt.');
+      setMarketStatus(`Published on-chain · ${txHash.slice(0, 12)}…`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const runOwnerAction = async (method: 'stop' | 'withdraw' | 'withdrawTokens') => {
+    const recipient = userAse1 || userHex;
+    if (!walletIsOwner || !recipient) return;
+    setActionBusy(true);
+    setActionMessage('');
+    setActionError('');
+    try {
+      let args: string[] = [];
+      if (method === 'withdraw') {
+        const amount = BigInt(strategy?.balanceAse || '0');
+        if (amount <= 0n) throw new Error('The bot contract has no ASE balance to withdraw.');
+        args = [recipient, amount.toString()];
+      } else if (method === 'withdrawTokens') {
+        args = [recipient];
+      }
+      const target = strategy?.ase1 || strategy?.address || address;
+      const txHash = await client.call(target, method, args);
+      const receipt = await client.waitReceipt(txHash, 120000);
+      if (!receipt.success) throw new Error(`${method} transaction reverted. Open the transaction in the explorer for details.`);
+      setActionMessage(`${method === 'stop' ? 'Bot stopped' : method === 'withdraw' ? 'ASE withdrawn' : 'Tokens reclaimed'} · ${txHash.slice(0, 12)}…`);
+      refresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  if (loading && !strategy) {
     return (
-      <section className="wrap section">
-        <div className="skeleton" style={{ height: 320 }} />
+      <section className="wrap section" style={{ minHeight: 380 }}>
+        <div className="detail-head">
+          <span className="label">
+            {localMatch ? `${localMatch.template.toUpperCase()} bot` : 'Connecting to bot'}
+          </span>
+          <h1 className="detail-title">{localMatch ? (localMatch.templateName || `${localMatch.template} bot`) : 'Loading contract…'}</h1>
+          <p className="section-note" style={{ color: 'var(--accent)' }}>
+            Reading live bot state from Asentum…
+          </p>
+        </div>
+        <div className="skeleton" style={{ height: 240, marginTop: 16 }} />
       </section>
     );
   }
@@ -32,83 +169,214 @@ export function StrategyDetail() {
   if (error || !strategy) {
     return (
       <section className="wrap section">
-        <h1 className="detail-title">Strategy not found</h1>
+        <h1 className="detail-title">Bot not found</h1>
         <p className="muted">
           {error ? `Chain read failed: ${error}` : 'No contract source at that address - it may not exist yet.'}
         </p>
-        <Link className="btn btn-ghost" to="/strategies" style={{ marginTop: 20 }}>
-          Back to registry
-        </Link>
+        <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+          <button type="button" className="btn btn-primary" onClick={refresh}>
+            Retry loading
+          </button>
+          <Link className="btn btn-ghost" to="/portfolio">
+            Back to portfolio
+          </Link>
+        </div>
       </section>
     );
   }
 
+  const bot = botTypeFor(strategy.template);
+  const running = strategy.stopped !== true && strategy.cron !== null;
+  const statusLabel = strategy.stopped === true ? 'Stopped' : running ? 'Active & Trading' : 'Idle / Unarmed';
+  const statusClass = strategy.stopped === true ? 'status-badge off' : running ? 'status-badge live' : 'status-badge pending';
+  const fills = buildFills(strategy);
+  const canWithdrawAse = BigInt(strategy.balanceAse || '0') > 0n
+    && !((strategy.template === 'grid' || strategy.template === 'dca') && strategy.stopped !== true);
+
   return (
     <>
       <section className="wrap detail-head">
-        <span className="label">{strategy.template} template</span>
+        <span className="label">
+          {bot ? `${bot.title} bot` : `${strategy.template} contract`}
+        </span>
         <h1 className="detail-title">{strategy.name}</h1>
         <div className="detail-meta">
-          <span className={strategy.verified ? 'verify' : 'verify bad'}>
-            {strategy.verified ? '✓ source hash matches codeHash' : '✗ hash mismatch'}
-          </span>
-          <span className="mono">{strategy.ase1}</span>
+          <span className={statusClass}>{statusLabel}</span>
+          <span>{strategy.symbol ? `${strategy.symbol} / ASE` : 'pair unavailable'}</span>
           <span>·</span>
-          <span>first event at block {strategy.deployBlock.toLocaleString('en-US')}</span>
+          <span className="mono">{strategy.ase1}</span>
           <span>·</span>
           <a className="link-arrow" href={explorerAddressUrl(strategy.address)} target="_blank" rel="noreferrer">
             explorer ↗
           </a>
         </div>
+
+        {walletIsOwner ? (
+          <div className="manage-bar">
+            <button
+              className={strategy.stopped ? 'btn btn-ghost' : 'btn btn-primary'}
+              style={{ borderColor: strategy.stopped ? undefined : 'rgba(255, 107, 107, 0.4)', color: strategy.stopped ? undefined : '#ff7b7b' }}
+              type="button"
+              disabled={actionBusy || strategy.stopped === true}
+              onClick={() => runOwnerAction('stop')}
+            >
+              {actionBusy ? 'Working…' : 'Stop bot'}
+            </button>
+            <button
+              className={canWithdrawAse ? 'btn btn-primary' : 'btn btn-ghost'}
+              type="button"
+              disabled={actionBusy || !canWithdrawAse}
+              onClick={() => runOwnerAction('withdraw')}
+            >
+              Withdraw ASE
+            </button>
+            {strategy.token && strategy.template !== 'momentum-signal' && (
+              <button
+                className={strategy.stopped === true ? 'btn btn-primary' : 'btn btn-ghost'}
+                type="button"
+                disabled={actionBusy || strategy.stopped !== true}
+                onClick={() => runOwnerAction('withdrawTokens')}
+              >
+                Reclaim tokens
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="manage-bar">
+            <Link className="btn btn-primary" to={`/deploy?template=${strategy.template}`}>Deploy a bot like this</Link>
+          </div>
+        )}
+
+        {walletIsOwner && (
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
+            {strategy.stopped === true
+              ? 'The schedule is cancelled. Any ASE and tokens left in the contract can be withdrawn.'
+              : canWithdrawAse
+                ? 'Stop the bot before withdrawing if it still has scheduled runs; unused gas escrow returns to the contract.'
+                : 'Stop the bot first to withdraw ASE from a grid or DCA contract, so its reserved buy budget cannot be drained mid-run.'}
+          </p>
+        )}
+        {actionMessage && <p className="muted" role="status" style={{ marginTop: 10 }}>{actionMessage}</p>}
+        {actionError && <div className="notice deploy-error" role="alert" style={{ marginTop: 10, maxWidth: 720 }}>{actionError}</div>}
       </section>
 
       <section className="wrap">
         <div className="metrics">
           <div className="metric">
-            <div className="metric-label">Fills</div>
+            <div className="metric-label">Trades</div>
             <div className="metric-value">{strategy.trades}</div>
           </div>
           <div className="metric">
-            <div className="metric-label">Volume</div>
-            <div className="metric-value">{fmtWei(strategy.volumeWei, 2)}</div>
-          </div>
-          <div className="metric">
-            <div className="metric-label">ASE held</div>
+            <div className="metric-label">ASE in contract</div>
             <div className="metric-value">{fmtWei(strategy.balanceAse, 3)}</div>
           </div>
+          {strategy.token && strategy.tokenDecimals !== null && (
+            <div className="metric">
+              <div className="metric-label">Tokens in contract</div>
+              <div className="metric-value">
+                {formatToken(BigInt(strategy.tokenBalance || '0'), strategy.tokenDecimals, strategy.symbol ?? '')}
+              </div>
+            </div>
+          )}
           <div className="metric">
-            <div className="metric-label">Realised</div>
+            <div className="metric-label">Gross received</div>
             <div className="metric-value">{fmtWei(strategy.realisedWei, 3)}</div>
           </div>
           <div className="metric">
-            <div className="metric-label">Cadence</div>
+            <div className="metric-label">Runs every</div>
             <div className="metric-value">
               {strategy.intervalSec ? fmtDuration(strategy.intervalSec) : '-'}
+            </div>
+          </div>
+          <div className="metric">
+            <div className="metric-label">Schedule status</div>
+            <div className="metric-value" style={{ fontSize: 16 }}>
+              {strategy.cron?.runsLeft ? `${strategy.cron.runsLeft} runs left` : strategy.stopped ? 'Stopped' : 'Continuous'}
             </div>
           </div>
         </div>
       </section>
 
+      <section className="wrap" style={{ paddingBottom: 24 }}>
+        {strategy.token && strategy.tokenDecimals !== null && <StrategyPnlPanel strategy={strategy} />}
+      </section>
+
+      <section className="wrap" style={{ paddingBottom: 34 }}>
+        <div className="panel">
+          <div className="panel-head">
+            <div>
+              <span className="label">Trade history</span>
+              <p className="muted" style={{ marginTop: 3, fontSize: 13 }}>Latest on-chain fills for this bot.</p>
+            </div>
+            <span className="pill pill-live">{fills.length} shown</span>
+          </div>
+          {fills.length === 0 ? (
+            <div className="panel-body muted">No trades yet. The bot will show each fill here once it executes.</div>
+          ) : (
+            <div className="table-scroll">
+              <table className="fills-table">
+                <thead>
+                  <tr>
+                    <th>Action</th>
+                    <th>Amount</th>
+                    <th>ASE</th>
+                    <th>Block</th>
+                    <th>Transaction</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fills.map((fill) => (
+                    <tr key={fill.key}>
+                      <td className={fill.side === 'Bought' ? 'fill-buy' : 'fill-sell'}>{fill.side}</td>
+                      <td>{fill.amount}</td>
+                      <td>{fill.ase}</td>
+                      <td className="dim">#{fill.block.toLocaleString('en-US')}</td>
+                      <td>
+                        <a href={explorerTxUrl(fill.txHash)} target="_blank" rel="noreferrer" className="link-arrow">
+                          {shortHash(fill.txHash)} ↗
+                        </a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+
       <section className="wrap" style={{ paddingBottom: 80 }}>
         <div className="panels">
-          <div style={{ display: 'grid', gap: 20 }}>
-            <div className="panel">
-              <div className="panel-head">
-                <span className="label">Contract source - read from the node</span>
-                <span className="mono dim" style={{ fontSize: 12 }}>
-                  {strategy.source.length} chars
-                </span>
+          <div style={{ display: 'grid', gap: 16 }}>
+            <details className="dev-accordion">
+              <summary>Technical data · contract source, events and schedule (Pro)</summary>
+              <div className="panel-body">
+                <dl className="kv">
+                  <dt>Pool</dt><dd>{strategy.poolId ? `#${strategy.poolId}` : '-'}</dd>
+                  <dt>Pair</dt><dd>{strategy.symbol ? `${strategy.symbol}/ASE` : '-'}</dd>
+                  <dt>Interval</dt><dd>{strategy.cron ? fmtDuration(Math.round(Number(strategy.cron.intervalSec) / 1000)) : strategy.intervalSec ? fmtDuration(strategy.intervalSec) : '-'}</dd>
+                  <dt>Next run</dt><dd>{nextRunLabel(strategy.cron)}</dd>
+                  <dt>Runs left</dt><dd>{strategy.cron?.runsLeft ?? '-'}</dd>
+                  <dt>Gas escrow</dt><dd>{strategy.cron ? `${weiToAse(strategy.cron.gasEscrow, 4)} ASE` : '-'}</dd>
+                  <dt>Job id</dt><dd>{strategy.jobId ?? '-'}</dd>
+                  <dt>Deploy block</dt><dd>{strategy.deployBlock.toLocaleString('en-US')}</dd>
+                  <dt>Source hash</dt><dd className="break-value">{strategy.codeHash || '-'}</dd>
+                  <dt>Read-back hash</dt><dd className="break-value">{strategy.localHash}</dd>
+                </dl>
+                <p className="muted" style={{ marginTop: 14, fontSize: 12.5 }}>
+                  The source returned by the network matches the hash stored in the contract account. This checks source consistency only; it is not a security audit.
+                  {strategy.verified ? ' Current status: match.' : ' Current status: could not verify.'}
+                </p>
               </div>
-              <CodeBlock source={strategy.source} />
-            </div>
+            </details>
 
-            <div className="panel">
-              <div className="panel-head">
-                <span className="label">Events</span>
-                <span className="mono dim" style={{ fontSize: 12 }}>
-                  {strategy.events.length} on chain
-                </span>
-              </div>
+            <details className="dev-accordion">
+              <summary>Contract source · {strategy.source.length.toLocaleString('en-US')} characters</summary>
+              <CodeBlock source={strategy.source} />
+            </details>
+
+            <details className="dev-accordion">
+              <summary>Events · {strategy.events.length} on chain</summary>
               {strategy.events.length === 0 ? (
                 <div className="panel-body muted">No events emitted yet.</div>
               ) : (
@@ -123,13 +391,7 @@ export function StrategyDetail() {
                           .map(([key, value]) => `${key}=${String(value).slice(0, 28)}`)
                           .join('  ')}
                       </span>
-                      <a
-                        className="dim"
-                        style={{ display: 'block', fontSize: 11 }}
-                        href={explorerTxUrl(event.txHash)}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
+                      <a className="dim" style={{ display: 'block', fontSize: 11 }} href={explorerTxUrl(event.txHash)} target="_blank" rel="noreferrer">
                         {shortHash(event.txHash)} ↗
                       </a>
                     </span>
@@ -137,77 +399,55 @@ export function StrategyDetail() {
                   </div>
                 ))
               )}
-            </div>
+            </details>
           </div>
 
-          <div style={{ display: 'grid', gap: 20 }}>
+          <div style={{ display: 'grid', gap: 16 }}>
             <div className="panel">
               <div className="panel-head">
-                <span className="label">Schedule</span>
-                <span className="live-dot">cron</span>
+                <span className="label">Contract</span>
+                <span className={strategy.verified ? 'pill pill-live' : 'pill pill-ended'}>{strategy.verified ? 'Verified' : 'Unverified'}</span>
               </div>
               <div className="panel-body">
                 <dl className="kv">
-                  <dt>Job id</dt>
-                  <dd>{strategy.jobId ?? '-'}</dd>
-                  <dt>Interval</dt>
-                  <dd>{strategy.cron ? `${strategy.cron.intervalSec}s` : strategy.intervalSec ? `${strategy.intervalSec}s` : '-'}</dd>
-                  <dt>Next run</dt>
-                  <dd>{nextRunLabel(strategy.cron)}</dd>
-                  <dt>Gas escrow</dt>
-                  <dd>{strategy.cron ? `${weiToAse(strategy.cron.gasEscrow, 4)} ASE` : '-'}</dd>
-                  <dt>Runs left</dt>
-                  <dd>{strategy.cron?.runsLeft ?? '-'}</dd>
+                  <dt>Address</dt><dd className="break-value">{strategy.ase1}</dd>
+                  <dt>Owner</dt><dd className="break-value">{strategy.owner ?? '-'}</dd>
+                  <dt>Status</dt><dd>{statusLabel}</dd>
                 </dl>
+                <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                  <a className="btn btn-ghost" href={explorerAddressUrl(strategy.address)} target="_blank" rel="noreferrer" style={{ flex: 1, justifyContent: 'center' }}>Explorer ↗</a>
+                  <button className="chip" type="button" onClick={refresh}>Refresh</button>
+                </div>
               </div>
             </div>
 
-            <div className="panel">
-              <div className="panel-head">
-                <span className="label">Verification</span>
-              </div>
-              <div className="panel-body">
-                <dl className="kv">
-                  <dt>On-chain</dt>
-                  <dd style={{ wordBreak: 'break-all' }}>{strategy.codeHash || '-'}</dd>
-                  <dt>Local BLAKE3</dt>
-                  <dd style={{ wordBreak: 'break-all' }}>{strategy.localHash}</dd>
-                  <dt>Verdict</dt>
-                  <dd>{strategy.verified ? 'match' : 'mismatch'}</dd>
-                </dl>
-                <p className="muted" style={{ marginTop: 16, fontSize: 13.5 }}>
-                  The source above was fetched with <code>eth_getCode</code>, hashed locally, and compared with the
-                  <code> codeHash</code> the contract stores. That is the whole verification story - no compiler,
-                  no submission form.
-                </p>
-              </div>
-            </div>
-
-            <div className="panel">
-              <div className="panel-head">
-                <span className="label">Venue</span>
-              </div>
-              <div className="panel-body">
-                <dl className="kv">
-                  <dt>Pool</dt>
-                  <dd>{strategy.poolId ? `Auras #${strategy.poolId}` : '-'}</dd>
-                  <dt>Pair</dt>
-                  <dd>{strategy.symbol ? `${strategy.symbol}/ASE` : '-'}</dd>
-                  <dt>Last signal</dt>
-                  <dd>{strategy.lastSignal ?? '-'}</dd>
-                  <dt>Signal block</dt>
-                  <dd>{strategy.lastSignalBlock?.toLocaleString('en-US') ?? '-'}</dd>
-                </dl>
-              </div>
-            </div>
+            {walletIsOwner && (
+              <details className="dev-accordion">
+                <summary>Publish to marketplace · owner only</summary>
+                <div className="panel-body">
+                  <p className="muted" style={{ fontSize: 13, marginBottom: 14 }}>Share this verified contract so other users can inspect the source and copy its settings. Publishing does not transfer ownership or funds.</p>
+                  {MARKETPLACE_ADDRESS ? (
+                    <>
+                      <div className="field"><label htmlFor="marketTitle">Listing name</label><input id="marketTitle" className="input" value={marketTitle} onChange={(event) => setMarketTitle(event.target.value)} placeholder={strategy.name} maxLength={60} /></div>
+                      <div className="field"><label htmlFor="marketDescription">Short description</label><textarea id="marketDescription" className="input" value={marketDescription} onChange={(event) => setMarketDescription(event.target.value)} placeholder="Explain what your bot does and when it may be useful…" maxLength={280} rows={3} /></div>
+                      <div className="field"><label htmlFor="marketTags">Tags · optional</label><input id="marketTags" className="input" value={marketTags} onChange={(event) => setMarketTags(event.target.value)} placeholder="dca, conservative, testnet" maxLength={120} /></div>
+                      <button className="btn btn-primary" type="button" disabled={actionBusy} onClick={publishToMarketplace}>{actionBusy ? 'Publishing…' : 'Publish bot'}</button>
+                      {marketStatus && <p className="muted" role="status" style={{ marginTop: 10 }}>{marketStatus}</p>}
+                    </>
+                  ) : (
+                    <div className="notice"><strong>The shared catalog is being configured</strong><span>The site operator must deploy the shared listing registry first. Your bot is not affected.</span></div>
+                  )}
+                </div>
+              </details>
+            )}
 
             <div className="panel">
               <div className="panel-body" style={{ textAlign: 'center' }}>
-                <p className="muted" style={{ fontSize: 14, marginBottom: 16 }}>
-                  Fork this template with your own parameters. The source is yours to copy.
+                <p className="muted" style={{ fontSize: 14, marginBottom: 14 }}>
+                  Copy this setup with your own amount and interval.
                 </p>
-                <Link className="btn btn-primary" to={`/deploy?template=${strategy.template}`}>
-                  Deploy this strategy
+                <Link className="btn btn-primary" to={`/deploy?template=${strategy.template}`} style={{ width: '100%', justifyContent: 'center' }}>
+                  Create a bot from this one
                 </Link>
               </div>
             </div>
