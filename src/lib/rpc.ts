@@ -13,6 +13,19 @@ import { ase1ToHex } from '@asentum/connect';
 
 export const RPC_URL = 'https://testnet.asentum.com';
 export const EXPLORER_URL = 'https://explorer.asentum.com';
+
+/**
+ * Base for explorer API calls.
+ *
+ * The explorer API sends no CORS headers, so a browser cannot call it
+ * cross-origin. The app therefore talks to a same-origin proxy
+ * (`/api/explorer`), configured for dev in vite.config.ts and for production
+ * in vercel.json. Node scripts (deploy checks) keep the direct absolute URL.
+ */
+function explorerApiBase(): string {
+  if (typeof window === 'undefined' || !window.location?.origin) return `${EXPLORER_URL}/api`;
+  return `${window.location.origin}/api/explorer`;
+}
 export const CHAIN_ID = 1423;
 
 /** Auras AMM (pool reads, quotes and swaps). */
@@ -584,8 +597,10 @@ export async function findRecentDeployments(lookbackBlocks = 200): Promise<strin
   for (let n = tip; n >= start; n -= 1) numbers.push(n);
 
   const found: string[] = [];
-  for (let i = 0; i < numbers.length; i += 25) {
-    const slice = numbers.slice(i, i + 25);
+  // Batches above ~10 block requests come back as 502 from the gateway, so the
+  // scan has to stay under that ceiling to return anything at all.
+  for (let i = 0; i < numbers.length; i += 10) {
+    const slice = numbers.slice(i, i + 10);
     const blocks = await rpcBatch<any>(
       slice.map((n) => ({ method: 'eth_getBlockByNumber', params: [`0x${n.toString(16)}`, true] })),
     );
@@ -666,7 +681,38 @@ export async function getBalance(address: string): Promise<{ balance: string; no
   }
 }
 
-/** POST /view - { contract, method, args }. Throws with the node's reason. */
+/**
+ * Small gate in front of /view: the public node rate-limits bursts (429), and
+ * several pages read pools at once. Capping concurrent reads and caching
+ * identical reads for a couple of seconds keeps the app under that limit.
+ */
+const VIEW_CACHE = new Map<string, { at: number; value: unknown }>();
+const VIEW_CACHE_MS = 800;
+const VIEW_MAX_CONCURRENT = 3;
+let viewActive = 0;
+const viewQueue: (() => void)[] = [];
+
+function acquireViewSlot(): Promise<void> {
+  if (viewActive < VIEW_MAX_CONCURRENT) {
+    viewActive += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => viewQueue.push(() => { viewActive += 1; resolve(); }));
+}
+
+function releaseViewSlot() {
+  viewActive = Math.max(0, viewActive - 1);
+  const next = viewQueue.shift();
+  if (next) next();
+}
+
+/** POST /view - { contract, method, args }. Throws with the node's reason.
+ *
+ * The public gateway intermittently answers 502/504 (HTML, not JSON) while it
+ * is busy. Those are retried with a timeout, because losing a read used to
+ * blank whole pages. A contract-level `{ ok: false }` answer is final and is
+ * never retried.
+ */
 export async function viewCall<T = string>(
   contract: string,
   method: string,
@@ -678,34 +724,57 @@ export async function viewCall<T = string>(
   } catch {
     // leave as is
   }
-  let res: Response | null = null;
+  const cacheKey = `${hexContract}|${method}|${args.join(',')}`;
+  const hit = VIEW_CACHE.get(cacheKey);
+  if (hit && Date.now() - hit.at < VIEW_CACHE_MS) return hit.value as T;
+
+  let lastMessage = '';
   for (let attempt = 0; attempt < 3; attempt++) {
+    let res: Response;
+    await acquireViewSlot();
     try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8_000);
       res = await fetch(`${RPC_URL}/view`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ contract: hexContract, method, args }),
+        signal: controller.signal,
       });
-      if (res.status === 429 || res.status >= 502) {
-        await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
-        continue;
-      }
-      break;
-    } catch (e) {
-      if (attempt === 2) throw e;
-      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      clearTimeout(timer);
+    } catch (err) {
+      lastMessage = err instanceof Error && err.name === 'AbortError' ? 'request timed out' : 'network failed';
+      await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+      continue;
+    } finally {
+      releaseViewSlot();
     }
+
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
+    if (json && typeof json === 'object') {
+      if (!json.ok) throw new Error(json.reason ?? `${method} failed`);
+      VIEW_CACHE.set(cacheKey, { at: Date.now(), value: json.returnValue });
+      return json.returnValue as T;
+    }
+
+    if (res.status === 429) {
+      lastMessage = 'the Asentum node is rate-limiting reads (429)';
+      await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+      continue;
+    }
+    lastMessage = res.status >= 500
+      ? `the Asentum node is busy (${res.status})`
+      : `unreadable response (${res.status})`;
+    if (res.status < 500) break;
+    await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
   }
-  if (!res) throw new Error(`${method} network failed`);
-  const text = await res.text();
-  let json: any;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`${method}: node returned non-JSON (${res.status}): ${text.slice(0, 100)}`);
-  }
-  if (!json.ok) throw new Error(json.reason ?? `${method} failed`);
-  return json.returnValue as T;
+  throw new Error(`${method}: ${lastMessage || 'no response from the node'}`);
 }
 
 export async function getAccountMeta(address: string): Promise<AccountMeta> {
@@ -848,7 +917,7 @@ export async function getRecentContracts(limit = 50, offset = 0): Promise<Indexe
   try {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), 2500);
-    const res = await fetch(`${EXPLORER_URL}/api/indexer/contracts?limit=${limit}&offset=${offset}`, {
+    const res = await fetch(`${explorerApiBase()}/indexer/contracts?limit=${limit}&offset=${offset}`, {
       signal: ctrl.signal,
     });
     clearTimeout(timeout);
@@ -861,6 +930,88 @@ export async function getRecentContracts(limit = 50, offset = 0): Promise<Indexe
   } catch {
     return [];
   }
+}
+
+/** Row from the explorer's transaction index. */
+export interface IndexedTxRow {
+  hash: string;
+  block_number: number;
+  timestamp: number;
+  from_addr: string;
+  to_addr: string | null;
+  value: string;
+  gas_used?: number | null;
+  status?: number | null;
+  method?: string | null;
+  contract_created?: string | null;
+}
+
+/** Row from the explorer's transfer index (native ASE or ARC-20 token). */
+export interface IndexedTransferRow {
+  tx_hash: string;
+  log_index: number;
+  block_number: number;
+  timestamp: number;
+  kind: 'native' | 'token';
+  token: string | null;
+  from_addr: string;
+  to_addr: string;
+  value: string;
+  symbol?: string | null;
+  token_name?: string | null;
+  decimals?: number | null;
+}
+
+/**
+ * Explorer-indexer GET with retries. The gateway intermittently answers
+ * 502/504 on healthy endpoints, so a single failure must not empty a page.
+ */
+export async function fetchIndexerJson<T>(url: string, timeoutMs = 8000): Promise<T | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      const res = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (res.ok) return (await res.json()) as T;
+      if (res.status !== 429 && res.status < 500) return null;
+    } catch {
+      // retry below
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+  }
+  return null;
+}
+
+/** Transactions sent to or from one address, newest first. */
+export async function getAddressTxs(hexAddress: string, size = 50): Promise<IndexedTxRow[]> {
+  const json = await fetchIndexerJson<{ rows?: IndexedTxRow[] }>(
+    `${explorerApiBase()}/indexer/address/${hexAddress}/txs?page=1&size=${size}`,
+  );
+  return Array.isArray(json?.rows) ? json.rows : [];
+}
+
+/** Native and ARC-20 transfers touching one address, newest first. */
+export async function getAddressTransfers(
+  hexAddress: string,
+  size = 100,
+): Promise<{ rows: IndexedTransferRow[]; total: number; indexedFrom: number }> {
+  const json = await fetchIndexerJson<{ rows?: IndexedTransferRow[]; total?: number; indexedFrom?: number }>(
+    `${explorerApiBase()}/indexer/address/${hexAddress}/transfers?page=1&size=${size}`,
+  );
+  return {
+    rows: Array.isArray(json?.rows) ? json.rows : [],
+    total: Number(json?.total ?? 0),
+    indexedFrom: Number(json?.indexedFrom ?? 0),
+  };
+}
+
+/** Network-wide recent transactions - used for the live venue feed. */
+export async function getRecentNetworkTxs(limit = 20): Promise<IndexedTxRow[]> {
+  const json = await fetchIndexerJson<{ rows?: IndexedTxRow[] }>(
+    `${explorerApiBase()}/indexer/txs/recent?limit=${limit}`,
+  );
+  return Array.isArray(json?.rows) ? json.rows : [];
 }
 
 export interface AurasPool {

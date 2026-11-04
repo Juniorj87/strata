@@ -13,7 +13,7 @@ export interface DeployedStrategyRecord {
   initTxHash?: string;
   transferTxHash?: string;
   hubTxHash?: string;
-  status: 'active' | 'deployed' | 'initialized' | 'funded' | 'failed';
+  status: 'active' | 'deployed' | 'initialized' | 'funded' | 'failed' | 'stopped';
   budget?: string;
   size?: string;
   buyBudgetAse?: string;

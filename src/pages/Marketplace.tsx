@@ -75,16 +75,22 @@ export function Marketplace() {
     <>
       <section className="wrap detail-head">
         <span className="label">Community · verified on-chain strategies</span>
-        <h1 className="detail-title">Community strategies</h1>
-        <p className="section-note" style={{ maxWidth: 760 }}>
+        <h1 className="detail-title">Shared strategies.</h1>
+        <p className="section-note" style={{ maxWidth: 700, marginTop: 18 }}>
           Browse strategies shared by their creators. Review what each strategy is designed to do, see its on-chain activity and use its template as a starting point. Use shared settings as a starting point, then review every value before signing. A listing is not an endorsement or a performance guarantee.
         </p>
-        <div className="mode-switch" role="tablist" style={{ marginTop: 18 }}>
+        <div className="mode-switch" role="tablist" style={{ marginTop: 22 }}>
           <Link to="/strategies" className="mode-option">
-            <span>Live Contracts</span><small>Running on-chain bots</small>
+            <span>Strategy catalog</span>
+            <small>Mechanics & bot types</small>
+          </Link>
+          <Link to="/strategies?tab=live" className="mode-option">
+            <span>Live contracts</span>
+            <small>Executing on-chain</small>
           </Link>
           <Link to="/marketplace" className="mode-option active">
-            <span>Marketplace Catalog</span><small>Copy & deploy setups</small>
+            <span>Marketplace</span>
+            <small>Shared setups</small>
           </Link>
         </div>
       </section>

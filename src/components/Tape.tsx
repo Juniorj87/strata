@@ -3,18 +3,13 @@ import { weiToAse } from '../lib/format';
 
 const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 
+/** Row list of recent Auras swaps. The surrounding panel provides the header. */
 export function Tape({ rows }: { rows: TapeRow[] }) {
   if (rows.length === 0) {
     return (
       <div className="tape">
-        <div className="tape-head">
-          <span className="label">Auras tape</span>
-          <span className="tape-live">live</span>
-        </div>
-        <div className="tape-row">
-          <span className="tape-block">-</span>
-          <span className="tape-name muted">no swaps in the last 600 blocks</span>
-          <span />
+        <div className="tape-row" style={{ gridTemplateColumns: '1fr' }}>
+          <span className="muted">No swaps in the last 600 blocks.</span>
         </div>
       </div>
     );
@@ -22,10 +17,6 @@ export function Tape({ rows }: { rows: TapeRow[] }) {
 
   return (
     <div className="tape">
-      <div className="tape-head">
-        <span className="label">Auras tape · real swaps</span>
-        <span className="tape-live">live</span>
-      </div>
       {rows.map((row) => {
         const nativeIn = row.tokenIn.toLowerCase() === NATIVE;
         return (

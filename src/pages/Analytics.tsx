@@ -1,57 +1,413 @@
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAsync } from '../lib/hooks';
-import { loadStrategies } from '../lib/registry';
-import { fmtNum, fmtWei, shortAddr } from '../lib/format';
+import {
+  buildSeries,
+  fillsInRange,
+  loadProtocol,
+  pairActivity,
+  RANGES,
+  strategyRows,
+  type RangeKey,
+  type StrategyRow,
+} from '../lib/protocol';
+import { fmtAgeFrom, fmtNum, fmtWei, formatUnits, shortAddr } from '../lib/format';
+import { BarList, ColumnChart } from '../components/Charts';
+import { botTypeFor } from '../lib/templates';
 
-function formatTokenAmount(rawValue: string, decimals: number | null, symbol: string | null): string {
-  if (decimals === null) return `${rawValue} raw units`;
-  const value = BigInt(rawValue || '0');
-  const scale = 10n ** BigInt(decimals);
-  const whole = value / scale;
-  const fraction = (value % scale).toString().padStart(decimals, '0').slice(0, 6).replace(/0+$/, '');
-  return `${whole.toLocaleString('en-US')}${fraction ? `.${fraction}` : ''} ${symbol ?? 'tokens'}`;
+type SortKey = 'fills' | 'gross' | 'inventory' | 'recent';
+
+const SORT_LABEL: Record<SortKey, string> = {
+  fills: 'executions',
+  gross: 'gross ASE',
+  inventory: 'open inventory',
+  recent: 'last activity',
+};
+
+function asBig(value: string): bigint {
+  try { return BigInt(value || '0'); } catch { return 0n; }
+}
+
+function statusOf(row: StrategyRow): { label: string; className: string } {
+  const strategy = row.strategy;
+  if (strategy.stopped === true) return { label: 'Stopped', className: 'status-badge off' };
+  if (strategy.cron !== null) return { label: 'Scheduled', className: 'status-badge live' };
+  return { label: 'Idle', className: 'status-badge pending' };
 }
 
 export function Analytics() {
-  const { data, loading, error, refresh } = useAsync(() => loadStrategies(), 30000);
-  const strategies = (data ?? []).filter((item) => item.verified);
-  const fills = strategies.reduce((sum, item) => sum + item.trades, 0);
-  const grossOutput = strategies.reduce((sum, item) => sum + BigInt(item.realisedWei || '0'), 0n);
-  const remainingMark = strategies.reduce((sum, item) => sum + BigInt(item.markValueAseWei || '0'), 0n);
-  const tokenSymbols = new Set(strategies.map((item) => item.symbol).filter(Boolean));
+  const { data, loading, error, refresh } = useAsync(() => loadProtocol(), 30_000);
+  const [range, setRange] = useState<RangeKey>('30D');
+  const [sortKey, setSortKey] = useState<SortKey>('fills');
+  const [sortDesc, setSortDesc] = useState(true);
+
+  const rows = useMemo(() => (data ? strategyRows(data) : []), [data]);
+  const verifiedRows = useMemo(() => rows.filter((row) => row.strategy.verified), [rows]);
+  const stats = data?.stats ?? null;
+  const rangeFills = useMemo(
+    () => fillsInRange(data?.fills ?? [], range),
+    [data, range],
+  );
+  const executionSeries = useMemo(
+    () => buildSeries(rangeFills, range, 'executions'),
+    [rangeFills, range],
+  );
+  const volumeSeries = useMemo(
+    () => buildSeries(rangeFills, range, 'ase'),
+    [rangeFills, range],
+  );
+  const pairs = useMemo(() => pairActivity(rangeFills), [rangeFills]);
+
+  const sorted = useMemo(() => {
+    const value = (row: StrategyRow) => {
+      switch (sortKey) {
+        case 'gross': return Number(asBig(row.grossAseWei));
+        case 'inventory': return Number(asBig(row.inventoryAseWei));
+        case 'recent': return row.lastFillAt ?? 0;
+        default: return row.fills;
+      }
+    };
+    return [...verifiedRows].sort((a, b) => (sortDesc ? value(b) - value(a) : value(a) - value(b)));
+  }, [verifiedRows, sortKey, sortDesc]);
+
+  const toggleSort = (key: SortKey) => {
+    if (key === sortKey) setSortDesc((desc) => !desc);
+    else {
+      setSortKey(key);
+      setSortDesc(true);
+    }
+  };
+
+  const sortHeader = (key: SortKey, label: string) => (
+    <button
+      type="button"
+      className={sortKey === key ? 'sort-btn active' : 'sort-btn'}
+      onClick={() => toggleSort(key)}
+      aria-label={`Sort by ${label}`}
+    >
+      {label} <i aria-hidden="true">{sortKey === key ? (sortDesc ? '↓' : '↑') : '↕'}</i>
+    </button>
+  );
+
+  const executionsEmpty = executionSeries.points.every((point) => point.value === 0);
+  const volumeEmpty = volumeSeries.points.every((point) => point.value === 0);
+
+  const stateLabel = error
+    ? data
+      ? 'Live refresh failed · last snapshot shown'
+      : 'Connection error'
+    : loading && !data
+      ? 'Reading hub registry and receipts…'
+      : stats && stats.verifiedStrategies === 0
+        ? 'No verified strategies indexed'
+        : `${fmtNum(stats?.verifiedStrategies ?? 0)} verified · ${fmtNum(data?.fills.length ?? 0)} indexed fills`;
 
   return (
     <>
       <section className="wrap detail-head">
         <span className="label">Performance · verified contract data</span>
-        <h1 className="detail-title">Strategy analytics</h1>
-        <p className="section-note" style={{ maxWidth: 760 }}>See how many strategies are active, how often they executed, how much ASE they received and the estimated value of tokens still held by their contracts. Open a strategy for a more detailed PnL estimate.</p>
-        <div className="mode-switch" role="tablist" style={{ marginTop: 18 }}>
+        <h1 className="detail-title">Protocol analytics</h1>
+        <p className="section-note" style={{ maxWidth: 680, marginTop: 18 }}>
+          Protocol-wide view of all verified strategies. Every figure below is derived from the same snapshot: Hub registrations, verified contract source, indexed transfers, and the swap receipts behind them. Open any strategy for a per-bot estimate with your own cost basis.
+        </p>
+        <div className="mode-switch" role="tablist" style={{ marginTop: 22 }}>
           <Link to="/analytics" className="mode-option active">
-            <span>Protocol Overview</span><small>Macro volume & executions</small>
+            <span>Protocol analytics</span>
+            <small>Volume & executions</small>
+          </Link>
+          <Link to="/activity" className="mode-option">
+            <span>Activity ledger</span>
+            <small>Every indexed fill</small>
           </Link>
           <Link to="/leaderboard" className="mode-option">
-            <span>Strategy Leaderboard</span><small>Ranked returns & win rates</small>
+            <span>Strategy leaderboard</span>
+            <small>Ranked strategies</small>
           </Link>
         </div>
       </section>
-      <section className="wrap analytics-page" style={{ paddingBottom: 90 }}>
-        <div className="leaderboard-toolbar"><span className="live-dot">{loading ? 'Reading verified contracts…' : `${strategies.length} verified strategies`}</span><button className="chip" type="button" onClick={refresh}>Refresh</button></div>
-        {error && <div className="notice deploy-error">Could not load analytics: {error}</div>}
-        <div className="leaderboard-stats">
-          <div className="metric"><span className="label">Verified strategies</span><strong>{fmtNum(strategies.length)}</strong></div>
-          <div className="metric"><span className="label">Executed fills</span><strong>{fmtNum(fills)}</strong></div>
-          <div className="metric"><span className="label">Token types traded</span><strong>{fmtNum(tokenSymbols.size)}</strong></div>
-          <div className="metric"><span className="label">Gross ASE proceeds</span><strong>{fmtWei(grossOutput)}</strong></div>
-          <div className="metric"><span className="label">Open inventory mark</span><strong>{fmtWei(remainingMark)}</strong></div>
+
+      <section className="wrap analytics-page">
+        <div className="leaderboard-toolbar">
+          <span className={error ? 'live-dot is-warn' : 'live-dot'}>{stateLabel}</span>
+          <span className="spacer" />
+          <button className="chip" type="button" onClick={refresh}>
+            Refresh
+          </button>
+          <Link className="btn btn-ghost btn-sm" to="/activity">
+            Activity ledger →
+          </Link>
         </div>
-        <div className="notice leaderboard-note"><strong>How to interpret this dashboard</strong><span>Token volumes are shown separately per asset because raw units from different tokens cannot be added together. Gross ASE proceeds are not profit. Inventory values are current AMM quotes, not guaranteed sale prices. For an estimated per-strategy PnL, enter your average acquisition cost on that strategy page. Known fill-transaction gas is included only when receipt data is complete; deployment, initialization and Cron escrow costs are not yet a complete accounting ledger.</span></div>
+
+        {error && (
+          <div className="notice deploy-error" role="alert" style={{ marginTop: 18 }}>
+            <strong>Live refresh failed</strong>
+            <span>
+              {error}. {data ? 'The figures below are the last successfully indexed snapshot.' : 'Nothing has been indexed in this session yet.'}
+            </span>
+          </div>
+        )}
+
+        <div className="leaderboard-stats">
+          <div className="metric">
+            <span className="label">Total strategies</span>
+            <strong>{stats ? fmtNum(stats.totalStrategies) : '—'}</strong>
+          </div>
+          <div className="metric">
+            <span className="label">Active strategies</span>
+            <strong>{stats ? fmtNum(stats.activeStrategies) : '—'}</strong>
+          </div>
+          <div className="metric">
+            <span className="label">Verified strategies</span>
+            <strong>{stats ? fmtNum(stats.verifiedStrategies) : '—'}</strong>
+          </div>
+          <div className="metric">
+            <span className="label">Executed fills</span>
+            <strong>{stats ? fmtNum(stats.executedFills) : '—'}</strong>
+          </div>
+          <div className="metric">
+            <span className="label">Gross ASE received</span>
+            <strong>{stats ? fmtWei(stats.grossAseWei, 2) : '—'}</strong>
+          </div>
+          <div className="metric">
+            <span className="label">Open inventory mark</span>
+            <strong>{stats ? fmtWei(stats.inventoryAseWei, 2) : '—'}</strong>
+          </div>
+          <div className="metric">
+            <span className="label">Token types traded</span>
+            <strong>{stats ? fmtNum(stats.tradedSymbols.length) : '—'}</strong>
+          </div>
+        </div>
+
+        <div className="range-bar">
+          <span className="label">Window</span>
+          <div className="range-tabs" role="group" aria-label="Time window">
+            {RANGES.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={range === item.key ? 'range-tab active' : 'range-tab'}
+                onClick={() => setRange(item.key)}
+                aria-pressed={range === item.key}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <span className="mono range-note">
+            {rangeFills.length === 0
+              ? 'no timestamps in this window'
+              : `${fmtNum(rangeFills.length)} fills carry an indexed timestamp`}
+          </span>
+        </div>
+
+        <div className="analytics-charts">
+          <div className="chart-block">
+            <div className="chart-block-head">
+              <div>
+                <span className="label">Executions over time</span>
+                <p className="muted">Indexed fill receipts · {range}</p>
+              </div>
+              <span className="mono chart-total">{fmtNum(executionSeries.filled)}</span>
+            </div>
+            {executionsEmpty ? (
+              <div className="chart-empty">
+                {loading && !data
+                  ? 'Indexing on-chain executions…'
+                  : 'No executions with an indexed timestamp in this window.'}
+              </div>
+            ) : (
+              <ColumnChart
+                points={executionSeries.points}
+                ariaLabel={`Executions over time, ${range}`}
+                format={(value) => String(Math.round(value))}
+              />
+            )}
+          </div>
+
+          <div className="chart-block">
+            <div className="chart-block-head">
+              <div>
+                <span className="label">ASE received over time</span>
+                <p className="muted">Token → ASE fills only · {range}</p>
+              </div>
+              <span className="mono chart-total">
+                {fmtWei(rangeFills.reduce((sum, fill) => sum + asBig(fill.aseAmount), 0n), 2)}
+              </span>
+            </div>
+            {volumeEmpty ? (
+              <div className="chart-empty">
+                {loading && !data ? 'Reading swap receipts…' : 'No ASE-received fills in this window.'}
+              </div>
+            ) : (
+              <ColumnChart
+                points={volumeSeries.points}
+                ariaLabel={`ASE received over time, ${range}`}
+                format={(value) => (value >= 1000 ? `${(value / 1000).toFixed(1)}k` : value.toFixed(value < 1 ? 2 : 0))}
+              />
+            )}
+          </div>
+        </div>
+
+        <div className="preview-grid" style={{ marginBottom: 22 }}>
+          <div className="preview-main">
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+              <div>
+                <span className="label">Strategy activity</span>
+                <p className="muted" style={{ fontSize: 12.5, marginTop: 5 }}>
+                  Ranked by indexed executions
+                </p>
+              </div>
+              <span className="pill pill-live">Verified</span>
+            </div>
+            <div style={{ marginTop: 22 }}>
+              {verifiedRows.length > 0 && verifiedRows.some((row) => row.fills > 0) ? (
+                <BarList
+                  data={[...verifiedRows]
+                    .sort((a, b) => b.fills - a.fills)
+                    .slice(0, 8)
+                    .map((row) => ({
+                      label: row.strategy.name.length > 30 ? `${row.strategy.name.slice(0, 30)}…` : row.strategy.name,
+                      value: row.fills,
+                      meta: row.strategy.symbol ? `${row.strategy.symbol}/ASE` : undefined,
+                    }))}
+                  format={(value) => `${value} fills`}
+                />
+              ) : (
+                <div className="empty">
+                  <h3>No execution data yet</h3>
+                  <p>Verified strategies appear here once their contracts execute a swap.</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="preview-main">
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+              <div>
+                <span className="label">Trading activity by pair</span>
+                <p className="muted" style={{ fontSize: 12.5, marginTop: 5 }}>
+                  Never summed across assets
+                </p>
+              </div>
+              <span className="pill pill-live">{range}</span>
+            </div>
+            <div style={{ marginTop: 22 }}>
+              {pairs.length > 0 ? (
+                <>
+                  <BarList
+                    data={pairs.slice(0, 6).map((pair) => ({
+                      label: `${pair.symbol}/ASE`,
+                      value: pair.fills,
+                      meta: `${pair.buys} buy · ${pair.sells} sell`,
+                    }))}
+                    format={(value) => `${value} fills`}
+                  />
+                  <dl className="pair-ledger">
+                    {pairs.slice(0, 4).map((pair) => (
+                      <div key={pair.symbol}>
+                        <dt className="mono">{pair.symbol}</dt>
+                        <dd className="mono">{fmtWei(pair.aseWei, 3)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </>
+              ) : (
+                <div className="empty">
+                  <h3>No paired activity</h3>
+                  <p>Choose a wider window or wait for a scheduled run to fill.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
         <div className="panel analytics-table-panel">
-          <div className="panel-head"><span className="label">Strategy performance</span><span className="muted">Verified source · Asentum testnet</span></div>
-          <div className="table-scroll"><table className="leaderboard-table"><thead><tr><th>Strategy</th><th>Pair</th><th>Fills</th><th>Token sold</th><th>Gross ASE</th><th>Open inventory</th><th>Details</th></tr></thead><tbody>
-            {strategies.map((item) => <tr key={item.address}><td><strong>{item.name}</strong><span className="mono muted" style={{ display: 'block' }}>{shortAddr(item.ase1, 8, 4)}</span></td><td>{item.symbol ? `${item.symbol}/ASE` : '—'}</td><td>{item.trades}</td><td className="mono">{formatTokenAmount(item.volumeWei, item.tokenDecimals, item.symbol)}</td><td className="mono">{fmtWei(item.realisedWei)}</td><td className="mono">{fmtWei(item.markValueAseWei || '0')}</td><td><Link className="link-arrow" to={`/strategies/${item.address}`}>Open ↗</Link></td></tr>)}
-          </tbody></table></div>
-          {!loading && strategies.length === 0 && <div className="empty small-empty">No verified strategy data found yet.</div>}
+          <div className="panel-head">
+            <div>
+              <span className="label">Strategy performance</span>
+              <p className="muted" style={{ marginTop: 3 }}>
+                Sorted by {SORT_LABEL[sortKey]} · {sortDesc ? 'descending' : 'ascending'}
+              </p>
+            </div>
+            <span className="muted" style={{ fontSize: 11.5 }}>
+              Verified source · Asentum testnet
+            </span>
+          </div>
+          <div className="table-scroll">
+            <table className="leaderboard-table">
+              <thead>
+                <tr>
+                  <th>Strategy</th>
+                  <th>Pair</th>
+                  <th>{sortHeader('fills', 'Fills')}</th>
+                  <th>Token sold</th>
+                  <th className="col-optional">{sortHeader('gross', 'Gross ASE')}</th>
+                  <th className="col-optional">{sortHeader('inventory', 'Open inventory')}</th>
+                  <th className="col-optional">{sortHeader('recent', 'Last activity')}</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((row) => {
+                  const strategy = row.strategy;
+                  const status = statusOf(row);
+                  return (
+                    <tr key={strategy.address}>
+                      <td>
+                        <Link to={`/strategies/${strategy.address}`} style={{ color: 'var(--text)' }}>
+                          <strong>{strategy.name}</strong>
+                        </Link>
+                        <span className="mono muted" style={{ display: 'block', fontSize: 10.5, marginTop: 2 }}>
+                          {botTypeFor(strategy.template)?.title ?? strategy.template} · {shortAddr(strategy.ase1, 8, 4)} ·{' '}
+                          <span className={status.className}>{status.label}</span>
+                        </span>
+                      </td>
+                      <td>{strategy.symbol ? `${strategy.symbol}/ASE` : '—'}</td>
+                      <td className="mono">{fmtNum(row.fills)}</td>
+                      <td className="mono">
+                        {strategy.tokenDecimals === null
+                          ? `${row.soldTokenRaw} raw`
+                          : `${formatUnits(row.soldTokenRaw, strategy.tokenDecimals, 4)}`}
+                      </td>
+                      <td className="mono col-optional">{fmtWei(row.grossAseWei, 3)}</td>
+                      <td className="mono col-optional">{fmtWei(row.inventoryAseWei, 3)}</td>
+                      <td className="mono col-optional">{row.lastFillAt ? fmtAgeFrom(row.lastFillAt) : '—'}</td>
+                      <td>
+                        <Link className="link-arrow" to={`/strategies/${strategy.address}`}>
+                          Open →
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {!loading && sorted.length === 0 && (
+            <div className="leaderboard-empty">
+              <h3>No verified strategy data found yet</h3>
+              <p className="muted">
+                {error
+                  ? 'The chain index could not be read. Retry once the connection recovers.'
+                  : 'Deploy a strategy or wait for the indexer to catch up with the finalized block.'}
+              </p>
+              <Link className="btn btn-primary btn-sm" to="/deploy" style={{ marginTop: 6 }}>
+                Deploy a strategy
+              </Link>
+            </div>
+          )}
+        </div>
+
+        <div className="leaderboard-note">
+          <strong>Methodology</strong>
+          <span>
+            Fills are counted from swap receipts attributed to a verified strategy contract; executed totals also
+            respect the contract&apos;s own counters. Gross ASE received is quote volume from token → ASE fills and is
+            not net profit. Open inventory is a live AMM quote, not a sale price. Token amounts are never added
+            together across different assets. Time charts only plot fills that carry an indexed timestamp; a bucket
+            with no fill stays empty rather than being smoothed or invented. A per-strategy PnL estimate needs a cost
+            basis and is computed only on the strategy page.
+          </span>
         </div>
       </section>
     </>

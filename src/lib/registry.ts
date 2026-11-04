@@ -1,19 +1,22 @@
 import {
   AURAS,
-  fetchPools,
+  ASEDEX_AMM,
   fetchAseDexPools,
+  fetchPools,
   findRecentDeployments,
   getAccountMeta,
+  getAddressTransfers,
+  getAddressTxs,
   getBalance,
   getContractSource,
   getCronJob,
-  getHeads,
-  getLogs,
   getPool,
   getReceipt,
-  getRecentContracts,
+  getRecentNetworkTxs,
   hashSource,
   readSavedPools,
+  NATIVE,
+  STRATA_HUB,
   toAse1,
   toHexAddress,
   viewCall,
@@ -22,18 +25,14 @@ import { getUserStrategies } from './userStrategies';
 import configured from '../config/strategies.json';
 
 const CONFIGURED = configured as unknown as { address: string; template?: string; pool?: string }[];
-let recentContractIndex: Promise<Awaited<ReturnType<typeof getRecentContracts>>> | null = null;
-
-function loadRecentContractIndex() {
-  if (!recentContractIndex) recentContractIndex = getRecentContracts(500, 0).catch(() => []);
-  return recentContractIndex;
-}
 
 export interface StrategyEvent {
   block: number;
   name: string;
   args: Record<string, unknown>;
   txHash: string;
+  /** Wall-clock milliseconds when the indexer or AMM event supplied one. */
+  timestamp?: number;
 }
 
 export interface LiveStrategy {
@@ -67,12 +66,20 @@ export interface LiveStrategy {
   transferHistoryComplete: boolean;
   accountingTxHashes: string[];
   trades: number;
+  /** Token units sent into the AMM by this strategy (token sold). */
   volumeWei: string;
+  /** ASE received from token -> ASE fills. Never net profit. */
   realisedWei: string;
+  /** Token units bought from the AMM. */
+  boughtTokenWei: string;
+  /** ASE spent on ASE -> token fills. */
+  spentAseWei: string;
   owner: string | null;
   stopped: boolean | null;
   lastSignal: string | null;
   lastSignalBlock: number | null;
+  lastFillAt: number | null;
+  fillsCapped: boolean;
   discovery: 'configured' | 'scan' | 'user';
   historyComplete: boolean;
 }
@@ -107,6 +114,166 @@ function classify(args: Record<string, unknown>): string {
   return 'Event';
 }
 
+interface ReceiptEvent {
+  name?: string;
+  data?: Record<string, unknown>;
+}
+
+function receiptEvents(receipt: Record<string, unknown> | null): ReceiptEvent[] {
+  if (!receipt || !Array.isArray((receipt as { events?: unknown }).events)) return [];
+  return (receipt as { events: ReceiptEvent[] }).events.filter((event) => event && typeof event === 'object');
+}
+
+interface AccountingResult {
+  fills: StrategyEvent[];
+  tokenTransfers: StrategyEvent[];
+  lifecycle: StrategyEvent[];
+  deployBlock: number | null;
+  transferTotal: number;
+  indexedFrom: number;
+  capped: boolean;
+  receiptsResolved: boolean;
+}
+
+const AMM_ADDRESSES = new Set([AURAS.toLowerCase(), ASEDEX_AMM.toLowerCase()]);
+
+/**
+ * Indexed accounting for one strategy contract.
+ *
+ * Scheduled executions are internal Cron calls, so they never appear as
+ * top-level transactions of the strategy. They do move tokens through the AMM,
+ * and the explorer indexes those transfers with timestamps. Each candidate
+ * trade transaction is then read once from the RPC receipt, which carries the
+ * exact Fill amountIn / amountOut pair.
+ */
+async function fetchStrategyAccounting(hex: string): Promise<AccountingResult> {
+  const empty: AccountingResult = {
+    fills: [],
+    tokenTransfers: [],
+    lifecycle: [],
+    deployBlock: null,
+    transferTotal: 0,
+    indexedFrom: 0,
+    capped: false,
+    receiptsResolved: false,
+  };
+
+  const [transfers, txs] = await Promise.all([
+    getAddressTransfers(hex, 100).catch(() => ({ rows: [], total: 0, indexedFrom: 0 })),
+    getAddressTxs(hex, 25).catch(() => []),
+  ]);
+
+  const lifecycle: StrategyEvent[] = txs.map((row) => ({
+    block: Number(row.block_number ?? 0),
+    name: row.method ? row.method.charAt(0).toUpperCase() + row.method.slice(1) : 'Transaction',
+    args: {
+      method: String(row.method ?? 'call'),
+      status: row.status === 0 ? 'reverted' : 'confirmed',
+      valueWei: String(row.value ?? '0'),
+    },
+    txHash: String(row.hash ?? ''),
+    timestamp: Number(row.timestamp) || undefined,
+  }));
+
+  const deployRow = txs.find((row) => row.method === 'deploy') ?? txs[txs.length - 1];
+  const deployBlock = deployRow && Number.isFinite(Number(deployRow.block_number))
+    ? Number(deployRow.block_number)
+    : null;
+
+  const rows = [...transfers.rows].sort((a, b) => Number(b.block_number) - Number(a.block_number));
+  const tokenTransfers: StrategyEvent[] = rows
+    .filter((row) => row.kind === 'token' && typeof row.token === 'string')
+    .map((row) => ({
+      block: Number(row.block_number ?? 0),
+      name: 'Transfer',
+      args: {
+        from: String(row.from_addr ?? '').toLowerCase(),
+        to: String(row.to_addr ?? '').toLowerCase(),
+        value: String(row.value ?? '0'),
+        token: String(row.token ?? '').toLowerCase(),
+      },
+      txHash: String(row.tx_hash ?? ''),
+      timestamp: Number(row.timestamp) || undefined,
+    }));
+
+  const tradeTxs = new Map<string, { block: number; timestamp: number }>();
+  for (const row of rows) {
+    if (row.kind !== 'token') continue;
+    const from = String(row.from_addr ?? '').toLowerCase();
+    const to = String(row.to_addr ?? '').toLowerCase();
+    if (!AMM_ADDRESSES.has(from) && !AMM_ADDRESSES.has(to)) continue;
+    if (!row.tx_hash || tradeTxs.has(row.tx_hash)) continue;
+    tradeTxs.set(row.tx_hash, { block: Number(row.block_number ?? 0), timestamp: Number(row.timestamp) || 0 });
+  }
+  if (tradeTxs.size === 0) {
+    return {
+      ...empty,
+      lifecycle,
+      tokenTransfers,
+      deployBlock,
+      transferTotal: transfers.total,
+      indexedFrom: transfers.indexedFrom,
+      receiptsResolved: true,
+    };
+  }
+
+  const candidates = [...tradeTxs.entries()].slice(0, 24);
+  const fills: StrategyEvent[] = [];
+  let receiptsResolved = true;
+
+  for (let offset = 0; offset < candidates.length; offset += 5) {
+    const batch = candidates.slice(offset, offset + 5);
+    const receipts = await Promise.all(batch.map(([hash]) => getReceipt(hash).catch(() => null)));
+    receipts.forEach((receipt, index) => {
+      const [hash, fallback] = batch[index];
+      if (!receipt) {
+        receiptsResolved = false;
+        return;
+      }
+      const events = receiptEvents(receipt);
+      const swap = events.find(
+        (event) => event.name === 'Swap' && String(event.data?.payer ?? '').toLowerCase() === hex,
+      )?.data;
+      const fill = events.find((event) => event.name === 'Fill')?.data;
+      const touchesStrategy = events.some((event) => {
+        if (event.name !== 'Transfer' || !event.data) return false;
+        const from = String(event.data.from ?? '').toLowerCase();
+        const to = String(event.data.to ?? '').toLowerCase();
+        return from === hex || to === hex;
+      });
+      if (!swap && !(fill && touchesStrategy)) return;
+      const data = fill && fill.tokenIn !== undefined ? fill : swap;
+      if (!data || data.tokenIn === undefined) return;
+      const block = Number(receipt.blockNumber ?? 0) || fallback.block;
+      const timestamp = Number(swap?.blockTimestamp ?? data.blockTimestamp ?? 0) || fallback.timestamp;
+      fills.push({
+        block,
+        name: 'Fill',
+        args: { ...swap, ...data },
+        txHash: hash,
+        timestamp: timestamp || undefined,
+      });
+    });
+  }
+
+  fills.sort((a, b) => b.block - a.block);
+
+  return {
+    fills,
+    tokenTransfers,
+    lifecycle,
+    deployBlock,
+    transferTotal: transfers.total,
+    indexedFrom: transfers.indexedFrom,
+    capped: tradeTxs.size > candidates.length,
+    receiptsResolved,
+  };
+}
+
+const toUnits = (value: unknown): bigint => {
+  try { return BigInt(String(value ?? '0').replace(/\D/g, '') || '0'); } catch { return 0n; }
+};
+
 /** Build one strategy record from chain state. */
 export async function loadStrategy(address: string, discovery: 'configured' | 'scan' | 'user' = 'configured'): Promise<LiveStrategy | null> {
   let hex: string;
@@ -124,100 +291,32 @@ export async function loadStrategy(address: string, discovery: 'configured' | 's
   const codeHash = String(meta.codeHash ?? '').replace(/^0x/, '').toLowerCase();
   const { name, template } = parseTemplate(source);
 
-  const [heads, recentContracts] = await Promise.all([
-    getHeads().catch(() => ({ finalized: 0, tip: 0 })),
-    Promise.race([
-      loadRecentContractIndex(),
-      new Promise<Awaited<ReturnType<typeof getRecentContracts>>>((r) => setTimeout(() => r([]), 1500)),
-    ]),
-  ]);
-  const indexedDeployment = recentContracts.find((entry) => {
-    try { return toHexAddress(entry.address).toLowerCase() === hex; }
-    catch { return entry.address.toLowerCase() === hex; }
-  });
-  // Bound the fallback scan window to 1,500 blocks so eth_getLogs never stalls.
-  const scanFrom = Number.isFinite(indexedDeployment?.deployBlock)
-    ? Math.max(Number(indexedDeployment?.deployBlock), heads.finalized - 1500)
-    : Math.max(0, heads.finalized - 1500);
+  // Deploy block comes from the address transaction index, which is a tiny
+  // response. The old code pulled the 500-contract index (~35 MB) for every
+  // strategy, which is what made Activity and Leaderboard stall on a busy
+  // gateway.
   const [ownerResult, statusResult] = await Promise.all([
     viewCall<unknown>(hex, 'getOwner', []).catch(() => ''),
     viewCall<unknown>(hex, 'getStatus', []).catch(() => ''),
   ]);
+
   let status: Record<string, unknown> = {};
   try {
     const decoded = typeof statusResult === 'string' ? JSON.parse(statusResult) as unknown : statusResult;
     status = decoded && typeof decoded === 'object' ? decoded as Record<string, unknown> : {};
   } catch { status = {}; }
 
-  const tokenValueEarly = status.token;
-  let token = tokenValueEarly ? String(tokenValueEarly) : null;
+  let token = status.token ? String(status.token) : null;
+  const poolId = status.poolId ? String(status.poolId) : null;
+  const intervalSec = status.intervalSec !== undefined && status.intervalSec !== null && Number.isFinite(Number(status.intervalSec))
+    ? Number(status.intervalSec)
+    : null;
+  const jobId = status.jobId ? String(status.jobId) : null;
 
-  // Fetch strategy logs and token logs concurrently with a strict 2s timeout
-  const [logsResult, transferLogsResult] = await Promise.all([
-    Promise.race([
-      getLogs(hex, scanFrom, heads.finalized || undefined)
-        .then((value) => ({ value, complete: true }))
-        .catch(() => ({ value: [], complete: false })),
-      new Promise<{ value: any[]; complete: boolean }>((r) => setTimeout(() => r({ value: [], complete: false }), 2000)),
-    ]),
-    token
-      ? Promise.race([
-          getLogs(token, scanFrom, heads.finalized || undefined)
-            .then((value) => ({ value, complete: true }))
-            .catch(() => ({ value: [], complete: false })),
-          new Promise<{ value: any[]; complete: boolean }>((r) => setTimeout(() => r({ value: [], complete: false }), 2000)),
-        ])
-      : Promise.resolve({ value: [], complete: false }),
-  ]);
-
-  const logs = logsResult.value;
-  const events: StrategyEvent[] = logs.map((log) => ({
-    block: log.blockNumber,
-    name: classify(log.args ?? {}),
-    args: log.args ?? {},
-    txHash: log.txHash,
-  }));
-  const ordered = [...events].sort((a, b) => a.block - b.block);
-  const deployBlock = ordered[0]?.block ?? (Number.isFinite(indexedDeployment?.deployBlock) ? Number(indexedDeployment?.deployBlock) : 0);
-
-  const armed = ordered.find((e) => e.args.jobId !== undefined) ?? ordered.find((e) => 'intervalSec' in e.args);
-  const poolIdValue = armed?.args.poolId ?? status.poolId;
-  const tokenValue = armed?.args.token ?? status.token;
-  const intervalValue = armed?.args.intervalSec ?? status.intervalSec;
-  const jobValue = armed?.args.jobId ?? status.jobId;
-  const poolId = poolIdValue ? String(poolIdValue) : null;
-  if (tokenValue) token = String(tokenValue);
-  const intervalSec = intervalValue !== undefined && intervalValue !== null ? Number(intervalValue) : null;
-  const jobId = jobValue ? String(jobValue) : null;
-  const normaliseAddress = (value: unknown) => {
-    const raw = String(value ?? '').toLowerCase();
-    if (!raw) return '';
-    try { return toHexAddress(raw).toLowerCase(); } catch { return raw; }
-  };
-  const tokenTransferLogs = transferLogsResult.value.filter((log) => {
-    const args = log.args ?? {};
-    return normaliseAddress(args.from) === hex || normaliseAddress(args.to) === hex;
-  });
-  const tokenTransfers: StrategyEvent[] = tokenTransferLogs.map((log) => ({
-    block: log.blockNumber,
-    name: 'Transfer',
-    args: {
-      ...(log.args ?? {}),
-      from: normaliseAddress(log.args?.from),
-      to: normaliseAddress(log.args?.to),
-    },
-    txHash: log.txHash,
-  }));
-  const transferHistoryComplete = Boolean(
-    token && transferLogsResult.complete && tokenTransferLogs.length <= 5000 && tokenTransferLogs.every((log) => {
-      const args = log.args;
-      return Boolean(
-        args && /^0x[0-9a-fA-F]{64}$/.test(log.txHash) &&
-        'from' in args && 'to' in args &&
-        /^\d+$/.test(String(args.value ?? args.amount ?? args.amountWei ?? '')),
-      );
-    }),
-  );
+  const accounting = await fetchStrategyAccounting(hex);
+  const tokenTransfers = token
+    ? accounting.tokenTransfers.filter((event) => String(event.args.token ?? '') === token!.toLowerCase())
+    : accounting.tokenTransfers;
 
   const cronJob = jobId ? await getCronJob(jobId).catch(() => null) : null;
   let poolSymbol: string | null = null;
@@ -225,27 +324,39 @@ export async function loadStrategy(address: string, discovery: 'configured' | 's
 
   if (poolId) {
     const cachedPools = typeof window !== 'undefined' ? (readSavedPools() ?? []) : [];
-    const matched = cachedPools.find((p) => String(p.id) === String(poolId));
+    const matched = cachedPools.find((p) => String(p.id) === String(poolId) && (!token || p.token.toLowerCase() === token.toLowerCase()))
+      ?? cachedPools.find((p) => String(p.id) === String(poolId));
     if (matched) {
       poolSymbol = matched.symbol;
       tokenDecimals = matched.decimals ?? null;
+      if (!token) token = matched.token;
     } else {
       try {
         const poolData = await getPool(poolId);
-        if (poolData && token) {
-          const sym = await viewCall<string>(token, 'symbol', []).catch(() => null);
-          const dec = await viewCall<string | number>(token, 'decimals', []).catch(() => 18);
-          poolSymbol = sym || (poolId === '1' ? 'AURA' : poolId === '2' ? 'NOVA' : poolId === '3' ? 'PULSE' : `POOL#${poolId}`);
-          tokenDecimals = Number(dec) || 18;
+        if (poolData) {
+          const t0 = poolData.token0?.toLowerCase();
+          const t1 = poolData.token1?.toLowerCase();
+          const chosen = t0 === token?.toLowerCase() ? poolData.token0
+            : t1 === token?.toLowerCase() ? poolData.token1
+              : (t0 !== NATIVE ? poolData.token0 : poolData.token1);
+          if (chosen && chosen.toLowerCase() !== NATIVE) {
+            token = chosen;
+            const [sym, dec] = await Promise.all([
+              viewCall<string>(chosen, 'symbol', []).catch(() => null),
+              viewCall<string | number>(chosen, 'decimals', []).catch(() => 18),
+            ]);
+            poolSymbol = sym || (poolId === '1' ? 'AURA' : `POOL#${poolId}`);
+            tokenDecimals = Number(dec) || 18;
+          }
         }
-      } catch {}
+      } catch { /* pool metadata unavailable */ }
     }
   }
 
   let tokenBalance = '0';
   let markValueAseWei: string | null = null;
   if (token) {
-    tokenBalance = String(await viewCall<unknown>(token, 'balanceOf', [hex]).catch(() => '0'));
+    tokenBalance = String(await viewCall<unknown>(token, 'balanceOf', [hex]).catch(() => '0')).replace(/"/g, '');
     if (poolId && BigInt(tokenBalance || '0') > 0n) {
       const quote = await viewCall<unknown>(AURAS, 'quote', [poolId, token, tokenBalance]).catch(() => null);
       if (quote !== null && quote !== undefined) markValueAseWei = String(quote);
@@ -254,16 +365,44 @@ export async function loadStrategy(address: string, discovery: 'configured' | 's
     }
   }
 
-  const fills = ordered.filter((e) => e.name === 'Fill');
-  const contractTrades = Number(status.legs ?? status.ticks ?? status.legsDone ?? 0);
+  const fills = accounting.fills;
+  const tokenLower = (token ?? '').toLowerCase();
+  const sold = tokenLower
+    ? fills.filter((event) => String(event.args.tokenIn ?? '').toLowerCase() === tokenLower)
+    : [];
+  const bought = tokenLower
+    ? fills.filter((event) => String(event.args.tokenOut ?? '').toLowerCase() === tokenLower)
+    : [];
+  let receivedAseWei = sold.reduce((sum, event) => sum + toUnits(event.args.amountOut), 0n);
+  let spentAseWei = bought.reduce((sum, event) => sum + toUnits(event.args.amountIn), 0n);
+  let soldTokenWei = sold.reduce((sum, event) => sum + toUnits(event.args.amountIn), 0n);
+  let boughtTokenWei = bought.reduce((sum, event) => sum + toUnits(event.args.amountOut), 0n);
+
+  const asCount = (value: unknown) => {
+    const count = Number(value ?? 0);
+    return Number.isFinite(count) ? count : 0;
+  };
+  // `ticks` counts scheduled runs, not filled orders, so it is never used here.
+  const contractTrades = asCount(status.legs ?? status.legsDone)
+    || asCount(status.buyLevel) + asCount(status.sellLevel);
   const trades = Math.max(fills.length, contractTrades);
-  const volumeWei = fills.length > 0
-    ? fills.reduce((sum, e) => sum + BigInt(String(e.args.amountIn ?? '0')), 0n).toString()
-    : String(status.spentAseWei ?? status.buySpentAseWei ?? '0');
-  const realisedWei = fills.length > 0
-    ? fills.reduce((sum, e) => sum + BigInt(String(e.args.amountOut ?? '0')), 0n).toString()
-    : String(status.earned ?? '0');
-  const lastSignalEvent = [...ordered].reverse().find((e) => 'signal' in e.args || 'action' in e.args);
+
+  // When the transfer index shows no swaps, fall back to the contract's own
+  // cumulative counters, which are still chain state - never to a guess.
+  if (fills.length === 0) {
+    receivedAseWei = toUnits(status.earned ?? status.realisedAseWei ?? 0);
+    spentAseWei = toUnits(status.spentAseWei ?? status.buySpentAseWei ?? 0);
+    soldTokenWei = 0n;
+    boughtTokenWei = 0n;
+  }
+
+  const lifecycleEvents = accounting.lifecycle.filter((event) => event.txHash);
+  const events: StrategyEvent[] = [...fills, ...lifecycleEvents].sort((a, b) => b.block - a.block);
+  const deployBlock = accounting.deployBlock ?? 0;
+  const lastFillAt = fills.reduce<number | null>(
+    (latest, event) => (event.timestamp ? Math.max(latest ?? 0, event.timestamp) : latest),
+    null,
+  );
 
   const rawOwner = (ownerResult || status.owner || '').toString().trim();
   let owner: string | null = null;
@@ -276,6 +415,21 @@ export async function loadStrategy(address: string, discovery: 'configured' | 's
     : typeof status.stopped === 'boolean'
       ? status.stopped
       : null;
+
+  // Transfer history is complete only when the indexer covered the whole life
+  // of the contract and returned every row it holds.
+  const transferHistoryComplete = Boolean(
+    token
+    && accounting.transferTotal <= accounting.tokenTransfers.length
+    && accounting.indexedFrom > 0
+    && deployBlock >= accounting.indexedFrom,
+  );
+
+  const txHashes = [
+    ...accounting.lifecycle.map((event) => event.txHash),
+    ...fills.map((event) => event.txHash),
+    ...tokenTransfers.map((event) => event.txHash),
+  ].filter((hash) => /^0x[0-9a-fA-F]{64}$/.test(hash));
 
   return {
     address: hex,
@@ -304,33 +458,93 @@ export async function loadStrategy(address: string, discovery: 'configured' | 's
     tokenBalance,
     markValueAseWei,
     tokenDecimals,
-    events: ordered.slice(-60).reverse(),
-    fillEvents: fills.slice(-2000),
+    events: events.slice(0, 60),
+    fillEvents: [...fills].sort((a, b) => a.block - b.block),
     tokenTransfers: tokenTransfers.slice(-5000),
     transferHistoryComplete,
-    accountingTxHashes: [...new Set([indexedDeployment?.deployTx ?? '', ...ordered.map((event) => event.txHash), ...tokenTransfers.map((event) => event.txHash)].filter((hash) => /^0x[0-9a-fA-F]{64}$/.test(hash)))],
+    accountingTxHashes: [...new Set(txHashes)],
     trades,
-    volumeWei,
-    realisedWei,
+    volumeWei: soldTokenWei.toString(),
+    realisedWei: receivedAseWei.toString(),
+    boughtTokenWei: boughtTokenWei.toString(),
+    spentAseWei: spentAseWei.toString(),
     owner,
     stopped,
-    lastSignal: lastSignalEvent ? String(lastSignalEvent.args.signal ?? lastSignalEvent.args.action ?? '') : null,
-    lastSignalBlock: lastSignalEvent?.block ?? null,
+    lastSignal: null,
+    lastSignalBlock: null,
+    lastFillAt,
+    fillsCapped: accounting.capped,
     discovery,
-    // A configured strategy without an indexed deployment block is scanned
-    // only over a bounded recent window; never label that history complete.
-    historyComplete: Boolean(indexedDeployment && logsResult.complete && transferHistoryComplete),
+    historyComplete: Boolean(
+      accounting.receiptsResolved
+      && !accounting.capped
+      && fills.length >= contractTrades
+      && transferHistoryComplete,
+    ),
   };
 }
 
-/** Configured strategies plus user-deployed strategies plus anything discovered recently. */
-export async function loadStrategies(): Promise<LiveStrategy[]> {
+/**
+ * Strategy contracts registered in Strata Hub.
+ *
+ * The indexer lists the Hub's own transactions, and each registration receipt
+ * carries the registered strategy address in its events. That needs neither a
+ * log scan nor a block batch — both of which the gateway often rejects — so a
+ * bot deployed from another browser or origin still appears here.
+ */
+async function fetchHubRegistrations(): Promise<string[]> {
+  let hubHex: string;
+  try { hubHex = toHexAddress(STRATA_HUB).toLowerCase(); } catch { return []; }
+  const rows = (await getAddressTxs(hubHex, 50).catch(() => [])).filter(
+    (row) => row.method === 'registerStrategy' && row.status !== 0,
+  );
+  const strategies = await Promise.all(rows.slice(0, 24).map(async (row) => {
+    const receipt = await getReceipt(row.hash).catch(() => null);
+    const events = receiptEvents(receipt);
+    const raw = events.find((event) => event?.name === 'StrategyRegistered')?.data?.strategy;
+    if (typeof raw !== 'string' || !raw.trim()) return null;
+    try { return toHexAddress(raw).toLowerCase(); } catch { return null; }
+  }));
+  return strategies.filter((value): value is string => Boolean(value));
+}
+
+/** Contracts this wallet deployed that are Strata templates. */
+async function fetchOwnerDeployments(owner: string): Promise<string[]> {
+  let ownerHex: string;
+  try { ownerHex = toHexAddress(owner).toLowerCase(); } catch { return []; }
+  const rows = (await getAddressTxs(ownerHex, 50).catch(() => [])).filter(
+    (row) => typeof row.contract_created === 'string' && /^0x[0-9a-fA-F]{40}$/.test(row.contract_created),
+  );
+  const checked = await Promise.all(rows.slice(0, 12).map(async (row) => {
+    const address = String(row.contract_created).toLowerCase();
+    const source = await getContractSource(address).catch(() => '');
+    return source.includes('Strata template:') && !source.includes('Strata template: strata-hub')
+      ? address
+      : null;
+  }));
+  return checked.filter((value): value is string => Boolean(value));
+}
+
+/** Configured strategies plus user-deployed strategies plus anything registered in the Hub. */
+async function fetchRegisteredStrategies(owner?: string): Promise<string[]> {
+  const [hub, own] = await Promise.all([
+    fetchHubRegistrations(),
+    owner ? fetchOwnerDeployments(owner) : Promise.resolve<string[]>([]),
+  ]);
+  const addresses: string[] = [];
+  for (const address of [...hub, ...own]) {
+    if (address && !addresses.includes(address)) addresses.push(address);
+  }
+  return addresses;
+}
+
+export async function loadStrategies(owner?: string): Promise<LiveStrategy[]> {
   const out: LiveStrategy[] = [];
 
   const configuredLoaded = await Promise.all(
     CONFIGURED
       .filter((entry) => entry.template !== 'strata-hub')
-      .map((entry) => loadStrategy(entry.address, 'configured').catch(() => null))
+      .map((entry) => loadStrategy(entry.address, 'configured').catch(() => null)),
   );
   for (const strategy of configuredLoaded) {
     if (strategy && strategy.template !== 'strata-hub') out.push(strategy);
@@ -341,19 +555,31 @@ export async function loadStrategies(): Promise<LiveStrategy[]> {
     const userRecords = getUserStrategies();
     const missing = userRecords.filter((rec) => !out.some((s) => s.address.toLowerCase() === rec.address.toLowerCase()));
     const userLoaded = await Promise.all(
-      missing.map((rec) => loadStrategy(rec.address, 'user').catch(() => null))
+      missing.map((rec) => loadStrategy(rec.address, 'user').catch(() => null)),
     );
     for (const strategy of userLoaded) {
-      if (strategy && strategy.template !== 'strata-hub') {
-        out.push(strategy);
-      }
+      if (strategy && strategy.template !== 'strata-hub') out.push(strategy);
     }
   } catch {
     // non-blocking
   }
 
+  // Canonical discovery: read the Hub registry so bots deployed from another
+  // browser, another origin or the Telegram client still appear here.
   try {
-    const recent = await fetchRecentDeployments(120);
+    const registered = (await fetchRegisteredStrategies(owner)).slice(0, 24);
+    const missing = registered.filter((address) => !out.some((s) => s.address.toLowerCase() === address));
+    const loaded = await Promise.all(missing.map((address) => loadStrategy(address, 'scan').catch(() => null)));
+    for (const strategy of loaded) {
+      if (strategy && strategy.template !== 'strata-hub') out.push(strategy);
+    }
+  } catch {
+    // Hub discovery can fail while the explorer is unhealthy; other paths still run.
+  }
+
+  // Fallback: catch unregistered contracts deployed in the last few minutes.
+  try {
+    const recent = await fetchRecentDeployments(60);
     for (const address of recent) {
       if (out.some((s) => s.address.toLowerCase() === address.toLowerCase())) continue;
       const source = await getContractSource(address).catch(() => '');
@@ -381,7 +607,12 @@ async function fetchRecentDeployments(lookback: number): Promise<string[]> {
   return addresses;
 }
 
-/** Live swap tape across the Auras pools - real activity, real blocks. */
+/**
+ * Live swap tape across the Auras pools.
+ *
+ * Reads the indexer's network-wide transaction feed (which does have
+ * timestamps) and resolves the swap amounts from each receipt.
+ */
 export interface TapeRow {
   block: number;
   pool: string;
@@ -390,32 +621,37 @@ export interface TapeRow {
   amountIn: string;
   amountOut: string;
   txHash: string;
+  timestamp?: number;
 }
 
 export async function loadTape(limit = 12): Promise<TapeRow[]> {
-  const { tip } = await getHeads();
-  // 60 blocks is roughly two minutes of activity; wider windows pull tens of
-  // thousands of logs at full-chain throughput and time out the browser.
-  const logs = await getLogs(AURAS, Math.max(0, tip - 60)).catch(() => []);
-  const pools = await fetchPools();
+  const [txs, pools] = await Promise.all([
+    getRecentNetworkTxs(40).catch(() => []),
+    fetchPools().catch(() => []),
+  ]);
+  const swaps = txs.filter((row) => row.method === 'swapExactIn' && row.status !== 0).slice(0, limit);
+  const receipts = await Promise.all(swaps.map((row) => getReceipt(row.hash).catch(() => null)));
   const rows: TapeRow[] = [];
-
-  for (const log of logs) {
-    const args = log.args ?? {};
-    if (!('payer' in args) || !('tokenIn' in args)) continue;
-    const poolId = String(args.poolId ?? '');
+  receipts.forEach((receipt, index) => {
+    const row = swaps[index];
+    const swap = receiptEvents(receipt).find((event) => event.name === 'Swap')?.data;
+    if (!swap) return;
+    const poolId = String(swap.poolId ?? '');
+    const tokenOut = String(swap.tokenOut ?? '');
+    const known = pools.find((pool) => pool.id === poolId)
+      ?? pools.find((pool) => pool.token.toLowerCase() === tokenOut.toLowerCase());
     rows.push({
-      block: log.blockNumber,
+      block: Number(row.block_number ?? 0),
       pool: poolId,
-      symbol: pools.find((p) => p.id === poolId)?.symbol ?? '?',
-      tokenIn: String(args.tokenIn),
-      amountIn: String(args.amountIn ?? '0'),
-      amountOut: String(args.amountOut ?? '0'),
-      txHash: log.txHash,
+      symbol: known?.symbol ?? 'TOKEN',
+      tokenIn: String(swap.tokenIn ?? ''),
+      amountIn: String(swap.amountIn ?? '0'),
+      amountOut: String(swap.amountOut ?? '0'),
+      txHash: row.hash,
+      timestamp: Number(row.timestamp) || Number(swap.blockTimestamp) || undefined,
     });
-  }
-
-  return rows.sort((a, b) => b.block - a.block).slice(0, limit);
+  });
+  return rows;
 }
 
 /** Live pool state: reserves, TWAP and spot quote. */
@@ -482,3 +718,5 @@ export async function loadAseDexPools(): Promise<LivePool[]> {
     venue: 'asedex',
   }));
 }
+
+export { classify };

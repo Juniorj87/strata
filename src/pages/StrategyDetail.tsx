@@ -9,7 +9,7 @@ import { CodeBlock } from '../components/CodeBlock';
 import { MARKETPLACE_ADDRESS } from '../lib/marketplace';
 import { StrategyPnlPanel } from '../components/StrategyPnlPanel';
 import { botTypeFor } from '../lib/templates';
-import { getUserStrategies } from '../lib/userStrategies';
+import { getUserStrategies, saveUserStrategy, saveUserTx } from '../lib/userStrategies';
 
 function nextRunLabel(cron: { nextRunAt: string } | null): string {
   if (!cron?.nextRunAt) return 'not scheduled';
@@ -138,10 +138,44 @@ export function StrategyDetail() {
       }
       const target = strategy?.ase1 || strategy?.address || address;
       const txHash = await client.call(target, method, args);
+      if (wallet.address && method === 'stop') {
+        saveUserTx(wallet.address, {
+          hash: txHash,
+          type: 'cancel',
+          description: `Stop ${strategy?.name ?? 'bot'}`,
+          timestamp: Date.now(),
+          status: 'pending',
+          strategyAddress: strategy?.address ?? address,
+        });
+      }
       const receipt = await client.waitReceipt(txHash, 120000);
       if (!receipt.success) throw new Error(`${method} transaction reverted. Open the transaction in the explorer for details.`);
-      setActionMessage(`${method === 'stop' ? 'Bot stopped' : method === 'withdraw' ? 'ASE withdrawn' : 'Tokens reclaimed'} · ${txHash.slice(0, 12)}…`);
+      if (method === 'stop' && wallet.address && strategy) {
+        const record = getUserStrategies(wallet.address).find(
+          (item) => item.address.toLowerCase() === strategy.address.toLowerCase(),
+        );
+        if (record) saveUserStrategy({ ...record, status: 'stopped' });
+        saveUserTx(wallet.address, {
+          hash: txHash,
+          type: 'cancel',
+          description: `Stop ${strategy.name}`,
+          timestamp: Date.now(),
+          status: 'confirmed',
+          strategyAddress: strategy.address,
+        });
+      }
+      setActionMessage(
+        `${method === 'stop' ? 'Bot stopped' : method === 'withdraw' ? 'ASE withdrawn' : 'Tokens reclaimed'} · ${txHash.slice(0, 12)}…`,
+      );
       refresh();
+      if (method === 'stop') {
+        // The node can lag one block; keep re-reading until the contract
+        // reports stopped instead of leaving the badge on "Active".
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          refresh();
+        }
+      }
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -186,12 +220,15 @@ export function StrategyDetail() {
   }
 
   const bot = botTypeFor(strategy.template);
-  const running = strategy.stopped !== true && strategy.cron !== null;
-  const statusLabel = strategy.stopped === true ? 'Stopped' : running ? 'Active & Trading' : 'Idle / Unarmed';
-  const statusClass = strategy.stopped === true ? 'status-badge off' : running ? 'status-badge live' : 'status-badge pending';
+  // A confirmed stop is stored locally as well: if the status read lags or
+  // the node rate-limits it, the page must not keep showing the bot as active.
+  const knownStopped = strategy.stopped === true || localMatch?.status === 'stopped';
+  const running = !knownStopped && strategy.cron !== null;
+  const statusLabel = knownStopped ? 'Stopped' : running ? 'Active & Trading' : 'Idle / Unarmed';
+  const statusClass = knownStopped ? 'status-badge off' : running ? 'status-badge live' : 'status-badge pending';
   const fills = buildFills(strategy);
   const canWithdrawAse = BigInt(strategy.balanceAse || '0') > 0n
-    && !((strategy.template === 'grid' || strategy.template === 'dca') && strategy.stopped !== true);
+    && !((strategy.template === 'grid' || strategy.template === 'dca') && !knownStopped);
 
   return (
     <>
@@ -214,10 +251,10 @@ export function StrategyDetail() {
         {walletIsOwner ? (
           <div className="manage-bar">
             <button
-              className={strategy.stopped ? 'btn btn-ghost' : 'btn btn-primary'}
-              style={{ borderColor: strategy.stopped ? undefined : 'rgba(255, 107, 107, 0.4)', color: strategy.stopped ? undefined : '#ff7b7b' }}
+              className="btn btn-ghost"
+              style={{ borderColor: knownStopped ? undefined : 'var(--down)', color: knownStopped ? undefined : 'var(--down)' }}
               type="button"
-              disabled={actionBusy || strategy.stopped === true}
+              disabled={actionBusy || knownStopped}
               onClick={() => runOwnerAction('stop')}
             >
               {actionBusy ? 'Working…' : 'Stop bot'}
@@ -232,9 +269,9 @@ export function StrategyDetail() {
             </button>
             {strategy.token && strategy.template !== 'momentum-signal' && (
               <button
-                className={strategy.stopped === true ? 'btn btn-primary' : 'btn btn-ghost'}
+                className={knownStopped ? 'btn btn-primary' : 'btn btn-ghost'}
                 type="button"
-                disabled={actionBusy || strategy.stopped !== true}
+                disabled={actionBusy || !knownStopped}
                 onClick={() => runOwnerAction('withdrawTokens')}
               >
                 Reclaim tokens
@@ -249,7 +286,7 @@ export function StrategyDetail() {
 
         {walletIsOwner && (
           <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
-            {strategy.stopped === true
+            {knownStopped
               ? 'The schedule is cancelled. Any ASE and tokens left in the contract can be withdrawn.'
               : canWithdrawAse
                 ? 'Stop the bot before withdrawing if it still has scheduled runs; unused gas escrow returns to the contract.'
@@ -258,6 +295,12 @@ export function StrategyDetail() {
         )}
         {actionMessage && <p className="muted" role="status" style={{ marginTop: 10 }}>{actionMessage}</p>}
         {actionError && <div className="notice deploy-error" role="alert" style={{ marginTop: 10, maxWidth: 720 }}>{actionError}</div>}
+        {wallet.connected && !walletIsOwner && (
+          <p className="muted" role="note" style={{ fontSize: 12.5, marginTop: 10 }}>
+            The connected wallet is not this bot&apos;s owner, so only its public state is shown. Connect the wallet that
+            deployed it to stop or withdraw.
+          </p>
+        )}
       </section>
 
       <section className="wrap">
@@ -291,7 +334,7 @@ export function StrategyDetail() {
           <div className="metric">
             <div className="metric-label">Schedule status</div>
             <div className="metric-value" style={{ fontSize: 16 }}>
-              {strategy.cron?.runsLeft ? `${strategy.cron.runsLeft} runs left` : strategy.stopped ? 'Stopped' : 'Continuous'}
+              {strategy.cron?.runsLeft ? `${strategy.cron.runsLeft} runs left` : knownStopped ? 'Stopped' : 'Continuous'}
             </div>
           </div>
         </div>

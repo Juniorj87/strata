@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
@@ -99,7 +99,8 @@ function initArgsFor(
 }
 
 export function Deploy() {
-  const [params] = useSearchParams();
+  const [params, setSearchParams] = useSearchParams();
+  const initialTokenHandledRef = useRef(false);
   const initialMode = params.get('mode') === 'pro' ? 'pro' : 'lite';
   const initialTemplate = templateById(params.get('template') || (initialMode === 'pro' ? 'momentum-signal' : 'dca'));
   const [mode, setMode] = useState<'lite' | 'pro'>(initialMode);
@@ -210,13 +211,27 @@ export function Deploy() {
     setBuySizeAse((Math.max(1, Number(amount) / 5)).toFixed(2));
   };
 
-  const selectTokenPool = (holding: UserTokenHolding) => {
-    if (holding.venue === 'asedex') {
+  const handleSelectPool = (targetPool: { id: string; venue?: string }) => {
+    initialTokenHandledRef.current = true;
+    if (targetPool.venue === 'asedex') {
       setSourceType('asepad');
-    } else {
+    } else if (targetPool.venue === 'auras') {
       setSourceType('strata');
     }
-    setPoolId(holding.poolId);
+    setPoolId(targetPool.id);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete('token');
+      next.set('pool', targetPool.id);
+      if (targetPool.venue === 'asedex') next.set('venue', 'asepad');
+      else next.delete('venue');
+      return next;
+    }, { replace: true });
+    setTokenModalOpen(false);
+  };
+
+  const selectTokenPool = (holding: UserTokenHolding) => {
+    handleSelectPool({ id: holding.poolId, venue: holding.venue });
     const dec = holding.decimals ?? 18;
     const raw = BigInt(holding.balanceRaw);
     const half = raw / 2n;
@@ -230,10 +245,19 @@ export function Deploy() {
 
   const switchVenue = (newVenue: 'strata' | 'asepad') => {
     if (newVenue === sourceType) return;
+    initialTokenHandledRef.current = true;
     setSourceType(newVenue);
     const targetPools = newVenue === 'strata' ? (pools.data ?? []) : (asedexPools.data ?? []);
     if (targetPools.length > 0) {
       setPoolId(targetPools[0].id);
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('token');
+        next.set('pool', targetPools[0].id);
+        if (newVenue === 'asepad') next.set('venue', 'asepad');
+        else next.delete('venue');
+        return next;
+      }, { replace: true });
     } else {
       setPoolId('');
     }
@@ -241,15 +265,31 @@ export function Deploy() {
 
   useEffect(() => {
     const tokenParam = params.get('token');
-    if (tokenParam && livePools.length > 0) {
-      const match = livePools.find(
-        (p) => p.token.toLowerCase() === tokenParam.toLowerCase() || p.symbol.toLowerCase() === tokenParam.toLowerCase(),
-      );
-      if (match && match.id !== poolId) {
-        setPoolId(match.id);
-        return;
+    const poolParam = params.get('pool');
+
+    // Only apply URL params once on initial load
+    if (!initialTokenHandledRef.current && livePools.length > 0) {
+      if (tokenParam) {
+        const match = livePools.find(
+          (p) => p.token.toLowerCase() === tokenParam.toLowerCase() || p.symbol.toLowerCase() === tokenParam.toLowerCase(),
+        );
+        if (match) {
+          initialTokenHandledRef.current = true;
+          setPoolId(match.id);
+          return;
+        }
+      } else if (poolParam) {
+        const match = livePools.find((p) => p.id === poolParam);
+        if (match) {
+          initialTokenHandledRef.current = true;
+          setPoolId(match.id);
+          return;
+        }
       }
+      initialTokenHandledRef.current = true;
     }
+
+    // Safety fallback: if current poolId is not present in the currently selected venue's pools
     if (livePools.length > 0 && !livePools.some((p) => p.id === poolId)) {
       setPoolId(livePools[0].id);
     }
@@ -907,9 +947,9 @@ export function Deploy() {
   return (
     <>
       <section className="wrap detail-head">
-        <span className="label">Strata terminal · Asentum testnet</span>
+        <span className="label">Create a bot · Asentum testnet</span>
         <h1 className="detail-title">Launch a trading bot.</h1>
-        <p className="section-note" style={{ maxWidth: 700 }}>
+        <p className="section-note" style={{ maxWidth: 640, marginTop: 18 }}>
           Pick what the bot should do, choose the token and amount, then read the plan in plain language.
           Your wallet signs every step — and you can stop the bot or withdraw your funds at any time.
         </p>
@@ -970,7 +1010,7 @@ export function Deploy() {
                 </div>
 
                 {wallet.connected && template.trades && template.id !== 'dca' && (!currentTokenHolding || currentTokenHolding.balanceNum === 0) && (
-                  <div className="notice" style={{ borderLeftColor: '#e8b84b' }}>
+                  <div className="notice" style={{ borderLeftColor: 'var(--warn)' }}>
                     <strong>You hold 0 {sym}</strong>
                     <span>
                       This bot sells tokens, so the contract needs {sym} in it. Change the token, or start a DCA bot that buys with ASE instead.
@@ -1269,12 +1309,12 @@ export function Deploy() {
                 </div>
 
                 {isWalletLocked && (
-                  <div className="notice" style={{ borderColor: '#eab308', background: 'rgba(234, 179, 8, 0.08)', marginBottom: 12 }}>
+                  <div className="notice" style={{ borderColor: 'var(--warn)', background: 'var(--warn-soft)', marginBottom: 12 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       <span style={{ fontSize: 20 }}>🔒</span>
                       <div>
-                        <strong style={{ color: '#eab308' }}>Asentum Wallet extension is locked</strong>
-                        <p style={{ margin: '3px 0 0', fontSize: 13, color: 'var(--text-muted)' }}>
+                        <strong style={{ color: 'var(--warn)' }}>Asentum Wallet extension is locked</strong>
+                        <p style={{ margin: '3px 0 0', fontSize: 13, color: 'var(--muted)' }}>
                           Click the <strong>Asentum icon</strong> in your browser toolbar (top right), enter your password to unlock it, and return here to launch.
                         </p>
                       </div>
@@ -1652,11 +1692,7 @@ export function Deploy() {
                     key={`${pool.venue ?? 'auras'}-${pool.id}`}
                     type="button"
                     className={active ? 'token-row-btn active' : 'token-row-btn'}
-                    onClick={() => {
-                      setSourceType(pool.venue === 'asedex' ? 'asepad' : 'strata');
-                      setPoolId(pool.id);
-                      setTokenModalOpen(false);
-                    }}
+                    onClick={() => handleSelectPool(pool)}
                   >
                     <span className="token-badge" aria-hidden="true">{pool.symbol.slice(0, 1)}</span>
                     <span className="token-select-main">
@@ -1707,7 +1743,7 @@ export function Deploy() {
                 className="deploy-stepper-bar"
                 style={{
                   width: currentStep === 6 ? '100%' : `${Math.max(10, ((currentStep - 1) / 5) * 100)}%`,
-                  background: stepStatus === 'error' ? '#ef4444' : undefined,
+                  background: stepStatus === 'error' ? 'var(--down)' : undefined,
                 }}
               />
             </div>
@@ -1814,12 +1850,12 @@ export function Deploy() {
             </div>
 
             {stepError && (
-              <div className="notice" style={{ borderColor: '#ef4444', background: 'rgba(239, 68, 68, 0.08)', marginBottom: 16 }}>
-                <strong style={{ color: '#ef4444' }}>Transaction halted:</strong>
+              <div className="notice" style={{ borderColor: 'var(--down)', background: 'var(--down-soft)', marginBottom: 16 }}>
+                <strong style={{ color: 'var(--down)' }}>Transaction halted:</strong>
                 <p style={{ margin: '4px 0 0', fontSize: 13 }}>{stepError}</p>
                 {/session|expired|locked/i.test(stepError) && (
-                  <div style={{ marginTop: 10, padding: '10px 12px', background: 'rgba(234, 179, 8, 0.12)', border: '1px solid rgba(234, 179, 8, 0.4)', borderRadius: 6 }}>
-                    <strong style={{ color: '#eab308', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <div style={{ marginTop: 10, padding: '10px 12px', background: 'var(--warn-soft)', border: '1px solid var(--warn)', borderRadius: 6 }}>
+                    <strong style={{ color: 'var(--warn)', display: 'flex', alignItems: 'center', gap: 6 }}>
                       🔒 Wallet is locked in browser extension
                     </strong>
                     <p style={{ margin: '4px 0 0', fontSize: 12, lineHeight: 1.5 }}>

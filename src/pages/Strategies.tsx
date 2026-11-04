@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
 import { loadStrategies } from '../lib/registry';
 import { StrategyCard } from '../components/StrategyCard';
@@ -21,115 +22,150 @@ const STRATEGY_GUIDES: StrategyGuide[] = [
   {
     id: 'dca',
     category: 'accumulation',
-    tag: 'AUTO-INVEST',
+    tag: 'Auto-invest',
     title: 'DCA (Dollar-Cost Averaging)',
     subtitle: 'Automated recurring accumulation with ASE',
-    summary: 'Regularly purchases your selected token with ASE at equal time intervals (e.g. every 1 hour, 4 hours, or 1 day) until your total ASE budget is exhausted.',
-    whyUse: 'Removes the emotional stress of trying to time the market. Buying fixed amounts over time averages your entry price down during dips and keeps accumulation disciplined.',
-    cadence: '15 min to 1 day (customizable)',
-    funding: 'Total ASE budget + 0.05 ASE network fee',
+    summary:
+      'Regularly purchases your selected token with ASE at equal time intervals (for example every hour, four hours or one day) until the total ASE budget is exhausted.',
+    whyUse:
+      'Removes the emotional stress of trying to time the market. Fixed amounts over time average your entry through dips and keep accumulation disciplined.',
+    cadence: '15 minutes to 1 day',
+    funding: 'Total ASE budget + cron gas escrow',
     recommendedFor: 'Long-term accumulation and dip-buying',
   },
   {
     id: 'limit-exit',
     category: 'take-profit',
-    tag: 'TAKE-PROFIT',
+    tag: 'Take-profit',
     title: 'Take-Profit Trigger',
     subtitle: 'Automated sell target into ASE',
-    summary: 'Monitors the AMM pool price on schedule and executes one complete sell order into ASE as soon as your target price (+5%, +10%, +20%) is reached. Once executed, the schedule terminates.',
-    whyUse: 'Guarantees that your profit targets are locked in automatically when prices spike, without requiring you to sit at your screen 24/7.',
+    summary:
+      'Monitors the AMM pool price on schedule and executes one complete sell order into ASE as soon as your target price (+5%, +10%, +20%) is reached. Once executed, the schedule terminates.',
+    whyUse:
+      'Locks in a profit target automatically when prices spike, without sitting in front of a screen. It is a scheduled check, not a resting order-book limit.',
     cadence: 'Checked every 60 seconds',
-    funding: 'Token allocation to sell + 0.05 ASE network fee',
+    funding: 'Token allocation to sell + cron gas escrow',
     recommendedFor: 'Locking in gains at upper resistance levels',
   },
   {
     id: 'grid',
     category: 'range',
-    tag: 'RANGE TRADING',
+    tag: 'Range trading',
     title: 'Grid Range Bot',
-    subtitle: 'Automated buy-low sell-high across price levels',
-    summary: 'Establishes a symmetrical grid of buy and sell price levels around the current price. When the price dips by your step (e.g. -2%), it buys tokens with ASE; when the price rallies (+2%), it sells tokens for ASE.',
-    whyUse: 'Generates continuous cash flow during sideways or consolidating markets where the price fluctuates within a horizontal channel without clear directional trend.',
-    cadence: 'Continuous execution across 3 to 10 levels',
-    funding: 'Tokens (for sell levels) + ASE reserve (for buy levels)',
-    recommendedFor: 'Flat, sideways or oscillating market corridors',
+    subtitle: 'Automated buy-low, sell-high across price levels',
+    summary:
+      'Establishes a symmetrical grid of buy and sell price levels around the current price. When the price dips by your step (-2%) it buys with ASE; when it rallies (+2%) it sells tokens for ASE.',
+    whyUse:
+      'Generates continuous activity during sideways markets where price oscillates inside a horizontal channel without a clear directional trend.',
+    cadence: 'Continuous across 3 to 10 levels',
+    funding: 'Tokens for sell levels + separate ASE reserve for buy levels',
+    recommendedFor: 'Flat, sideways or oscillating corridors',
   },
   {
     id: 'risk-managed',
     category: 'protection',
-    tag: 'CAPITAL PROTECTION',
+    tag: 'Capital protection',
     title: 'Stop-Loss & Risk Manager',
-    subtitle: 'Hard-coded downside protection & daily loss limits',
-    summary: 'Safeguards your portfolio from deep drawdowns and flash crashes. If the market drops past your stop-loss percentage (-5%, -10%), the contract latches and executes orderly spot sales into ASE. Also supports trailing drawdown protection and daily loss caps.',
-    whyUse: 'Guarantees that a bad market downturn cannot wipe out your capital. The rules execute automatically on-chain without human emotion, panic, or delays.',
-    cadence: 'Checked every 5 min to 1 hour',
+    subtitle: 'Downside protection and daily loss limits',
+    summary:
+      'Safeguards the position from deep drawdowns. If the market drops past your stop-loss (-5%, -10%), the contract latches and executes orderly spot sales into ASE. Trailing drawdown and daily loss caps are supported too.',
+    whyUse:
+      'A bad downturn cannot be left entirely to emotion or delay: the rules execute on-chain, without a human in the loop.',
+    cadence: 'Checked every 5 minutes to 1 hour',
     funding: 'Token allocation + declared average buy price',
-    recommendedFor: 'High-volatility tokens and downside defense',
+    recommendedFor: 'High-volatility tokens and downside defence',
   },
   {
     id: 'twap',
     category: 'execution',
-    tag: 'SPLIT ORDER',
+    tag: 'Split order',
     title: 'TWAP Order Slicer',
     subtitle: 'Large position liquidation without price collapse',
-    summary: 'What is TWAP? When selling a large quantity of tokens at once, the transaction exhausts pool liquidity, causing massive price slippage and crashing the price against you. TWAP (Time-Weighted Average Price) divides your large order into multiple equal, smaller slices executed at regular time intervals (e.g. 5 orders over 30 minutes).',
-    whyUse: 'Essential for large token holders: ensures minimal price impact on the AMM, allows the pool to absorb the volume naturally, and achieves a vastly superior average execution price.',
+    summary:
+      'Selling a large quantity at once exhausts pool liquidity and moves the price against you. TWAP divides the order into equal slices executed at regular intervals — five orders over thirty minutes, for example.',
+    whyUse:
+      'Keeps price impact contained on an AMM, lets the pool absorb volume naturally, and improves the average execution price of a large exit.',
     cadence: 'Splits across 5 to 20 timed slices',
-    funding: 'Token allocation to liquidate + 0.05 ASE network fee',
-    recommendedFor: 'Whales & large bag sales with low pool slippage',
+    funding: 'Token allocation to liquidate + cron gas escrow',
+    recommendedFor: 'Large bag sales with low pool slippage',
   },
   {
     id: 'scale',
     category: 'execution',
-    tag: 'LADDER SELL',
+    tag: 'Ladder sell',
     title: 'Scale Ladder Order',
     subtitle: 'Incremental profit taking at staggered price steps',
-    summary: 'Splits a token allocation into a ladder of sell levels between the current pool price and a target upside price. Sells one slice each time a higher price step is breached.',
-    whyUse: 'Lets you scale out of a winning position gradually rather than selling everything too early or missing the top.',
-    cadence: 'One bounded swap per cron interval as tiers hit',
-    funding: 'Token allocation + 0.05 ASE network fee',
+    summary:
+      'Splits a token allocation into a ladder of sell levels between the current pool price and a target upside price, selling one slice each time a higher step is breached.',
+    whyUse:
+      'Lets you scale out of a winning position gradually instead of selling everything too early or missing the top.',
+    cadence: 'One bounded swap per cron interval',
+    funding: 'Token allocation + cron gas escrow',
     recommendedFor: 'Scaling out of runners during sustained rallies',
   },
   {
     id: 'momentum-signal',
     category: 'analytics',
-    tag: 'ANALYTICS',
+    tag: 'Analytics',
     title: 'Momentum Signal Generator',
     subtitle: 'Algorithmic trend indicator contract',
-    summary: 'Calculates rolling TWAP price windows across consecutive intervals. When moving price changes breach your configured basis-point threshold, it emits on-chain buy, sell, or neutral momentum signals.',
-    whyUse: 'Allows algorithmic operators and external smart contracts to read verified on-chain trend indicators without trusting off-chain oracles.',
+    summary:
+      'Calculates rolling TWAP windows across consecutive intervals. When average price movement breaches your basis-point threshold, it emits on-chain buy, sell or neutral momentum signals.',
+    whyUse:
+      'Gives operators and other contracts a verified on-chain trend indicator without trusting an off-chain oracle.',
     cadence: 'Computes trends every 60 seconds',
-    funding: 'Gas escrow in ASE only (no tokens required)',
-    recommendedFor: 'Algorithmic traders & automated trend listeners',
+    funding: 'Gas escrow in ASE only — no tokens required',
+    recommendedFor: 'Algorithmic traders and automated trend listeners',
   },
 ];
 
-export function Strategies() {
-  const [params, setParams] = useSearchParams();
-  const activeTab = (params.get('tab') as 'catalog' | 'live' | 'marketplace') || 'catalog';
-  const [category, setCategory] = useState<string>('all');
-  const { data, loading, error, refresh } = useAsync(() => loadStrategies(), 15000);
-  const list = data ?? [];
+type CatalogTab = 'catalog' | 'live' | 'marketplace';
 
-  const setTab = (tab: 'catalog' | 'live' | 'marketplace') => {
+export function Strategies() {
+  const wallet = useWallet();
+  const [params, setParams] = useSearchParams();
+  const tabParam = params.get('tab');
+  const activeTab: CatalogTab = tabParam === 'live' || tabParam === 'marketplace' ? tabParam : 'catalog';
+  const [category, setCategory] = useState<string>('all');
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'scheduled' | 'idle'>('all');
+  const { data, loading, error, refresh } = useAsync(
+    () => loadStrategies(wallet.address ?? undefined),
+    15000,
+    true,
+    wallet.address,
+  );
+  const list = useMemo(() => data ?? [], [data]);
+
+  const setTab = (tab: CatalogTab) => {
     setParams({ tab }, { replace: true });
   };
 
-  const filteredGuides = category === 'all'
-    ? STRATEGY_GUIDES
-    : STRATEGY_GUIDES.filter((g) => g.category === category);
+  const filteredGuides =
+    category === 'all' ? STRATEGY_GUIDES : STRATEGY_GUIDES.filter((guide) => guide.category === category);
+
+  const filteredContracts = useMemo(() => {
+    const term = query.trim().toLowerCase();
+    return list.filter((item) => {
+      const scheduled = item.cron !== null && item.stopped !== true;
+      if (statusFilter === 'scheduled' && !scheduled) return false;
+      if (statusFilter === 'idle' && scheduled) return false;
+      if (!term) return true;
+      return `${item.name} ${item.template} ${item.symbol ?? ''} ${item.ase1}`.toLowerCase().includes(term);
+    });
+  }, [list, query, statusFilter]);
 
   return (
     <>
       <section className="wrap detail-head">
         <span className="label">Strategies · Asentum testnet</span>
-        <h1 className="detail-title">Trading strategies.</h1>
-        <p className="section-note" style={{ maxWidth: 720 }}>
-          Explore automated strategy bots running on Asentum. Review the mechanics of each bot type below,
-          inspect live contracts on-chain, or copy community setups from the marketplace.
+        <h1 className="detail-title">Trading strategies,<br />without the terminal.</h1>
+        <p className="section-note" style={{ maxWidth: 640, marginTop: 18 }}>
+          Every strategy below is a contract you own. Read what each bot type does, inspect the live contracts
+          already executing on Asentum, or start from a shared setup.
         </p>
 
-        <div className="mode-switch" role="tablist" style={{ marginTop: 20 }}>
+        <div className="mode-switch" role="tablist" aria-label="Strategy views">
           <button
             type="button"
             role="tab"
@@ -137,8 +173,8 @@ export function Strategies() {
             className={activeTab === 'catalog' ? 'mode-option active' : 'mode-option'}
             onClick={() => setTab('catalog')}
           >
-            <span>Strategy Catalog</span>
-            <small>Guides & bot types</small>
+            <span>Strategy catalog</span>
+            <small>Mechanics & bot types</small>
           </button>
           <button
             type="button"
@@ -147,27 +183,28 @@ export function Strategies() {
             className={activeTab === 'live' ? 'mode-option active' : 'mode-option'}
             onClick={() => setTab('live')}
           >
-            <span>Live Contracts ({list.length})</span>
-            <small>Active on-chain bots</small>
+            <span>Live contracts ({list.length})</span>
+            <small>Executing on-chain</small>
           </button>
           <Link to="/marketplace" className="mode-option">
-            <span>Marketplace Catalog</span>
-            <small>Copy & deploy setups</small>
+            <span>Marketplace</span>
+            <small>Shared setups</small>
           </Link>
         </div>
       </section>
 
-      <section className="wrap" style={{ paddingBottom: 90 }}>
+      <section className="wrap" style={{ paddingBottom: 96 }}>
         {activeTab === 'catalog' && (
           <div>
-            <div className="chip-row" style={{ marginBottom: 20 }}>
+            <div className="chip-row" style={{ marginBottom: 22 }}>
               {[
-                { id: 'all', label: `All bots (${STRATEGY_GUIDES.length})` },
-                { id: 'accumulation', label: 'Accumulation (DCA)' },
-                { id: 'take-profit', label: 'Take-Profit' },
-                { id: 'range', label: 'Range Trading (Grid)' },
-                { id: 'protection', label: 'Capital Protection' },
-                { id: 'execution', label: 'Split Execution (TWAP/Scale)' },
+                { id: 'all', label: `All templates (${STRATEGY_GUIDES.length})` },
+                { id: 'accumulation', label: 'Accumulation' },
+                { id: 'take-profit', label: 'Take-profit' },
+                { id: 'range', label: 'Range / grid' },
+                { id: 'protection', label: 'Protection' },
+                { id: 'execution', label: 'Split execution' },
+                { id: 'analytics', label: 'Analytics' },
               ].map((chip) => (
                 <button
                   key={chip.id}
@@ -182,15 +219,19 @@ export function Strategies() {
 
             <div className="catalog-grid">
               {filteredGuides.map((guide) => {
-                const matchStrategies = list.filter((item) => item.template === guide.id);
-                const totalTrades = matchStrategies.reduce((sum, item) => sum + item.trades, 0);
+                const matches = list.filter((item) => item.template === guide.id);
+                const scheduled = matches.filter((item) => item.cron !== null && item.stopped !== true);
+                const totalTrades = matches.reduce((sum, item) => sum + item.trades, 0);
+
                 return (
-                  <div className="catalog-card" key={guide.id}>
+                  <article className="catalog-card" key={guide.id}>
                     <div>
                       <div className="catalog-card-head">
                         <span className="catalog-tag">{guide.tag}</span>
-                        <span className="mono dim" style={{ fontSize: 11 }}>
-                          {matchStrategies.length > 0 ? `${matchStrategies.length} active on-chain` : 'Verified Template'}
+                        <span className="mono dim" style={{ fontSize: 10.5 }}>
+                          {matches.length > 0
+                            ? `${matches.length} on-chain · ${scheduled.length} scheduled`
+                            : 'Verified template'}
                         </span>
                       </div>
                       <h2 className="catalog-title">{guide.title}</h2>
@@ -199,32 +240,51 @@ export function Strategies() {
                       <div className="catalog-body">
                         <div className="catalog-point">
                           <strong>What it does</strong>
-                          <p style={{ margin: 0 }}>{guide.summary}</p>
+                          <p>{guide.summary}</p>
                         </div>
                         <div className="catalog-point">
                           <strong>Why use it</strong>
-                          <p style={{ margin: 0 }}>{guide.whyUse}</p>
+                          <p>{guide.whyUse}</p>
                         </div>
                       </div>
                     </div>
 
                     <div>
                       <div className="catalog-meta">
-                        <div><span className="dim">Cadence: </span><strong>{guide.cadence}</strong></div>
-                        <div><span className="dim">Needs: </span><strong>{guide.funding}</strong></div>
-                        {matchStrategies.length > 0 && (
-                          <div><span className="dim">On-chain activity: </span><strong className="mono" style={{ color: 'var(--accent)' }}>{totalTrades} executions</strong></div>
+                        <div>
+                          <span className="dim">Cadence </span>
+                          <strong>{guide.cadence}</strong>
+                        </div>
+                        <div>
+                          <span className="dim">Needs </span>
+                          <strong>{guide.funding}</strong>
+                        </div>
+                        <div>
+                          <span className="dim">Best for </span>
+                          <strong>{guide.recommendedFor}</strong>
+                        </div>
+                        {matches.length > 0 && (
+                          <div>
+                            <span className="dim">Indexed fills </span>
+                            <strong className="mono" style={{ color: 'var(--accent)' }}>
+                              {totalTrades}
+                            </strong>
+                          </div>
                         )}
                       </div>
 
                       <Link
-                        to={guide.id === 'momentum-signal' ? '/deploy?template=momentum-signal&mode=pro' : `/deploy?template=${guide.id}`}
-                        className="btn btn-primary"
+                        to={
+                          guide.id === 'momentum-signal'
+                            ? '/deploy?template=momentum-signal&mode=pro'
+                            : `/deploy?template=${guide.id}`
+                        }
+                        className="btn btn-ghost"
                       >
-                        Use this template ↗
+                        Use this template <span className="arr" aria-hidden="true">→</span>
                       </Link>
                     </div>
-                  </div>
+                  </article>
                 );
               })}
             </div>
@@ -233,40 +293,67 @@ export function Strategies() {
 
         {activeTab === 'live' && (
           <div>
-            <div className="filters">
+            <div className="contract-toolbar">
+              <input
+                className="input"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search by name, token or address…"
+                aria-label="Search live strategies"
+              />
+              <select
+                className="input"
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(event.target.value as 'all' | 'scheduled' | 'idle')}
+                aria-label="Filter by schedule status"
+                style={{ maxWidth: 170 }}
+              >
+                <option value="all">All contracts</option>
+                <option value="scheduled">Scheduled</option>
+                <option value="idle">Idle</option>
+              </select>
+              <span className="spacer" />
               <span className="live-dot">
-                {loading ? 'Scanning Asentum testnet for verified strategy deployments…' : `${list.length} verified strategy contracts`}
+                {loading ? 'Reading chain' : `${filteredContracts.length} of ${list.length} contracts`}
               </span>
-              <button className="chip" onClick={refresh} type="button" style={{ marginLeft: 'auto' }}>
+              <button className="chip" onClick={refresh} type="button">
                 Refresh
               </button>
             </div>
 
             {error && (
-              <div className="notice" style={{ borderLeftColor: 'var(--down)', marginBottom: 20 }}>
-                Could not read the strategy list from RPC: {error}
+              <div className="notice deploy-error" role="alert" style={{ marginBottom: 20 }}>
+                <strong>Could not read the strategy list from RPC</strong>
+                <span>{error}</span>
               </div>
             )}
 
             {loading && list.length === 0 && (
-              <div className="scanning-indicator">
-                <span className="live-dot">Scanning chain state</span>
-                <p style={{ margin: 0, fontSize: 14 }}>Reading strategy contracts from Strata Hub and recent deployments…</p>
+              <div className="grid grid-3">
+                {[0, 1, 2, 3, 4, 5].map((item) => (
+                  <div className="card" key={item} aria-hidden="true">
+                    <div className="skeleton" style={{ height: 16, width: '62%' }} />
+                    <div className="skeleton" style={{ height: 10, width: '44%' }} />
+                    <div className="skeleton" style={{ height: 46 }} />
+                    <div className="skeleton" style={{ height: 10, width: '70%' }} />
+                  </div>
+                ))}
               </div>
             )}
 
             {!loading && list.length === 0 && (
               <div className="empty" style={{ margin: '30px auto' }}>
-                <h3 style={{ fontSize: 18, marginBottom: 8 }}>No active strategy contracts discovered</h3>
-                <p style={{ maxWidth: 520, margin: '0 auto 10px', fontSize: 14 }}>
-                  This tab lists contracts whose source can be read back from the chain. A bot that exists only in
-                  this browser&rsquo;s local record (for example an unarmed deployment) is still listed in your portfolio.
+                <h3>No active strategy contracts discovered</h3>
+                <p>
+                  This view lists contracts whose source can be read back from the chain. A bot that exists only
+                  in this browser&rsquo;s local record — for example an unarmed deployment — still appears in your
+                  portfolio.
                 </p>
-                <p style={{ maxWidth: 520, margin: '0 auto 20px', fontSize: 14 }}>
+                <p>
                   If you just deployed, give the node a minute and press Refresh: the indexer and the log scan both
                   lag the finalized block slightly.
                 </p>
-                <div style={{ display: 'flex', gap: 10, justifyContent: 'center', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center', marginTop: 8 }}>
                   <Link className="btn btn-primary" to="/deploy">
                     Deploy a strategy
                   </Link>
@@ -277,9 +364,26 @@ export function Strategies() {
               </div>
             )}
 
-            <div className="grid grid-3" style={{ marginTop: 16 }}>
-              {list.map((s) => (
-                <StrategyCard key={s.address} strategy={s} />
+            {!loading && list.length > 0 && filteredContracts.length === 0 && (
+              <div className="empty">
+                <h3>No contracts match this filter</h3>
+                <p>Clear the search or switch the status filter to see every indexed contract.</p>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  type="button"
+                  onClick={() => {
+                    setQuery('');
+                    setStatusFilter('all');
+                  }}
+                >
+                  Reset filters
+                </button>
+              </div>
+            )}
+
+            <div className="grid grid-3">
+              {filteredContracts.map((strategy) => (
+                <StrategyCard key={strategy.address} strategy={strategy} />
               ))}
             </div>
           </div>

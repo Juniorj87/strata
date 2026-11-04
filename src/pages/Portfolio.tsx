@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useWallet } from '@asentum/connect';
+import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
 import { loadPools, loadAseDexPools, loadStrategies } from '../lib/registry';
 import { explorerAddressUrl, explorerTxUrl, toAse1, toHexAddress } from '../lib/rpc';
-import { fmtWei, shortAddr } from '../lib/format';
+import { fmtWei, shortAddr, weiToAse } from '../lib/format';
 import { botTypeFor } from '../lib/templates';
 import {
   fetchUserTokenHoldings,
   getUserStrategies,
   getUserTxs,
+  saveUserStrategy,
+  saveUserTx,
   type DeployedStrategyRecord,
   type UserTokenHolding,
   type UserTxRecord,
@@ -30,6 +32,8 @@ function statusOf(
   status: DeployedStrategyRecord['status'],
   liveMatch?: { cron: any; stopped?: boolean | null } | null,
 ): { label: string; className: string } {
+  // A receipt-confirmed stop wins over a status read that may be stale.
+  if (status === 'stopped') return { label: 'Stopped', className: 'status-badge off' };
   if (liveMatch) {
     if (liveMatch.stopped) return { label: 'Stopped', className: 'status-badge off' };
     if (liveMatch.cron !== null) return { label: 'Running', className: 'status-badge live' };
@@ -58,17 +62,35 @@ function planLabel(record: DeployedStrategyRecord): string {
   }
 }
 
+function amountLabel(record: DeployedStrategyRecord): string {
+  if (record.template === 'dca') return `${record.buyBudgetAse || record.budget || '—'} ASE`;
+  if (record.template === 'grid') {
+    return `${record.budget || '—'} ${record.tokenSymbol || ''}${record.buyBudgetAse ? ` + ${record.buyBudgetAse} ASE` : ''}`.trim();
+  }
+  return record.budget ? `${record.budget} ${record.tokenSymbol ?? ''}`.trim() : '—';
+}
+
+const ALLOC_COLORS = ['var(--accent)', 'var(--accent-2)', 'var(--up)', 'var(--warn)', 'var(--dim)'];
+
 export function Portfolio() {
   const wallet = useWallet();
+  const client = useAsentum();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<'tokens' | 'bots' | 'activity'>('tokens');
   const [holdings, setHoldings] = useState<UserTokenHolding[]>([]);
   const [loadingHoldings, setLoadingHoldings] = useState(false);
   const [copiedAddr, setCopiedAddr] = useState(false);
+  const [stopping, setStopping] = useState<string | null>(null);
+  const [botNotice, setBotNotice] = useState<Record<string, { kind: 'ok' | 'err'; text: string }>>({});
 
-  const pools = useAsync(() => loadPools(), 30000);
-  const asedexPools = useAsync(() => loadAseDexPools(), 30000);
-  const liveStrategies = useAsync(() => loadStrategies(), 25000);
+  const pools = useAsync(() => loadPools(), 60_000);
+  const asedexPools = useAsync(() => loadAseDexPools(), 60_000);
+  const liveStrategies = useAsync(
+    () => loadStrategies(wallet.address ?? undefined),
+    25000,
+    true,
+    wallet.address,
+  );
 
   const allPools = useMemo(
     () => [...(pools.data ?? []), ...(asedexPools.data ?? [])],
@@ -95,6 +117,49 @@ export function Portfolio() {
   const userStrategies: DeployedStrategyRecord[] = wallet.connected && wallet.address
     ? getUserStrategies(wallet.address)
     : [];
+
+  const stopBot = async (record: DeployedStrategyRecord) => {
+    if (!wallet.connected || !wallet.address) {
+      wallet.openConnect();
+      return;
+    }
+    setStopping(record.address);
+    setBotNotice((prev) => ({ ...prev, [record.address]: { kind: 'ok', text: 'Confirm the stop in your wallet…' } }));
+    try {
+      const hash = await client.call(record.address, 'stop', []);
+      saveUserTx(wallet.address, {
+        hash,
+        type: 'cancel',
+        description: `Stop ${record.templateName ?? record.template} bot`,
+        timestamp: Date.now(),
+        status: 'pending',
+        strategyAddress: record.address,
+      });
+      setBotNotice((prev) => ({ ...prev, [record.address]: { kind: 'ok', text: 'Stop sent · waiting for the receipt…' } }));
+      const receipt = await client.waitReceipt(hash, 120_000);
+      if (!receipt.success) throw new Error('The stop transaction reverted on chain.');
+      saveUserTx(wallet.address, {
+        hash,
+        type: 'cancel',
+        description: `Stop ${record.templateName ?? record.template} bot`,
+        timestamp: Date.now(),
+        status: 'confirmed',
+        strategyAddress: record.address,
+      });
+      saveUserStrategy({ ...record, status: 'stopped' });
+      setBotNotice((prev) => ({ ...prev, [record.address]: { kind: 'ok', text: `Bot stopped · ${hash.slice(0, 12)}…` } }));
+      liveStrategies.refresh();
+      void refreshHoldings();
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      const text = /reject|denied|cancel|declin/i.test(raw)
+        ? 'The wallet rejected the transaction. The bot keeps running.'
+        : raw;
+      setBotNotice((prev) => ({ ...prev, [record.address]: { kind: 'err', text } }));
+    } finally {
+      setStopping(null);
+    }
+  };
 
   const userTxs: UserTxRecord[] = wallet.connected && wallet.address
     ? getUserTxs(wallet.address)
@@ -128,14 +193,28 @@ export function Portfolio() {
 
   const nativeHolding = holdings.find((h) => h.isNative);
   const tokenHoldings = holdings.filter((h) => !h.isNative);
-  // A bot that finished init + funding has no local "active" marker; it is live
-  // until it is stopped, so count those as running instead of showing zero.
   const runningBots = userStrategies.filter(
     (strategy) => strategy.status === 'active' || strategy.status === 'funded',
   ).length;
   const botsToFinish = userStrategies.filter(
     (strategy) => strategy.status === 'deployed' || strategy.status === 'initialized',
   ).length;
+
+  const allocation = useMemo(() => {
+    const rows = holdings.map((holding) => {
+      let valueAse = 0;
+      if (holding.isNative) {
+        valueAse = holding.balanceNum;
+      } else {
+        const pool = allPools.find((item) => item.id === holding.poolId && item.token.toLowerCase() === holding.token.toLowerCase())
+          ?? allPools.find((item) => item.token.toLowerCase() === holding.token.toLowerCase());
+        valueAse = pool ? holding.balanceNum * Number(weiToAse(pool.spot, 6)) : 0;
+      }
+      return { holding, valueAse };
+    });
+    const total = rows.reduce((sum, row) => sum + row.valueAse, 0);
+    return { rows: rows.sort((a, b) => b.valueAse - a.valueAse), total };
+  }, [holdings, allPools]);
 
   const copyAddress = async (text: string) => {
     try {
@@ -149,29 +228,37 @@ export function Portfolio() {
 
   if (!wallet.connected || !wallet.address) {
     return (
-      <section className="wrap" style={{ padding: '60px 0 100px' }}>
-        <div className="detail-head">
-          <span className="label">Your Strata portfolio</span>
-          <h1 className="detail-title">Connect your wallet.</h1>
-          <p className="section-note" style={{ maxWidth: 640 }}>
-            See your balances, the bots you run and every transaction they made — all from one wallet.
+      <section className="wrap" style={{ padding: '70px 0 100px' }}>
+        <div className="detail-head" style={{ paddingTop: 0 }}>
+          <span className="label">Portfolio · Asentum testnet</span>
+          <h1 className="detail-title">Your capital, in one view.</h1>
+          <p className="section-note" style={{ maxWidth: 620 }}>
+            Connect a wallet to see balances, the bots you run, the capital committed to them and every
+            transaction they made.
           </p>
         </div>
-        <div className="panel" style={{ maxWidth: 500, margin: '30px auto', padding: '36px 24px', textAlign: 'center' }}>
-          <div className="wallet-connect-icon" style={{ display: 'inline-flex', padding: 14, borderRadius: '50%', background: 'var(--surface-2)', marginBottom: 16 }}>
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--accent)' }}>
+
+        <div className="panel" style={{ maxWidth: 520, margin: '34px 0', padding: '34px 28px' }}>
+          <div className="wallet-connect-icon">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
               <path d="M20 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z" />
               <path d="M16 3H4a2 2 0 0 0-2 2v2" />
               <circle cx="16" cy="14" r="2" />
             </svg>
           </div>
-          <h2 style={{ fontSize: 20, marginBottom: 8 }}>Wallet not connected</h2>
-          <p className="muted" style={{ marginBottom: 22, fontSize: 14 }}>
-            Connect with the Asentum extension or mobile wallet to see your portfolio and manage your bots.
+          <h2 style={{ fontSize: 22, marginBottom: 8 }}>Wallet not connected</h2>
+          <p className="muted" style={{ marginBottom: 22, fontSize: 13.5, lineHeight: 1.65 }}>
+            Connect with the Asentum extension or mobile wallet. Strata reads your balances and contracts; it
+            never takes custody of your funds.
           </p>
-          <button type="button" className="btn btn-primary" onClick={() => wallet.openConnect()}>
-            Connect Asentum wallet
-          </button>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" className="btn btn-primary" onClick={() => wallet.openConnect()}>
+              Connect Asentum wallet
+            </button>
+            <Link className="btn btn-ghost" to="/strategies">
+              Browse strategies
+            </Link>
+          </div>
         </div>
       </section>
     );
@@ -183,60 +270,136 @@ export function Portfolio() {
   return (
     <>
       <section className="wrap detail-head">
-        <span className="label">Portfolio · Asentum testnet</span>
-        <h1 className="detail-title">My portfolio</h1>
-        <p className="section-note" style={{ maxWidth: 720 }}>
-          Balances, running bots and their history. Every bot is a contract you own — nothing is held by a server.
-        </p>
+        <div className="pf-head">
+          <div>
+            <span className="label">Portfolio · Asentum testnet</span>
+            <h1 className="detail-title" style={{ marginBottom: 10 }}>My portfolio</h1>
+            <p className="section-note" style={{ maxWidth: 560 }}>
+              Balances, running bots and their history. Every bot is a contract you own — nothing is held by a
+              server.
+            </p>
+          </div>
+          <Link className="btn btn-primary" to="/deploy">
+            Create a bot <span className="arr" aria-hidden="true">→</span>
+          </Link>
+        </div>
+
+        <div className="pf-address">
+          <span className="live-dot">Connected</span>
+          <span className="mono" style={{ color: 'var(--text-2)' }}>{shortAddr(ase1Addr, 14, 8)}</span>
+          <button type="button" className="chip" onClick={() => copyAddress(ase1Addr)}>
+            {copiedAddr ? 'Copied' : 'Copy address'}
+          </button>
+          <a href={explorerAddressUrl(hexAddr)} target="_blank" rel="noreferrer" className="chip">
+            Explorer ↗
+          </a>
+          <button type="button" className="chip" onClick={refreshHoldings} disabled={loadingHoldings}>
+            {loadingHoldings ? 'Refreshing…' : 'Refresh balances'}
+          </button>
+        </div>
+
+        {(() => {
+          const botValue = Number(weiToAse(totalAseInBots, 2));
+          const totalValue = allocation.total + botValue;
+          const deployedPct = totalValue > 0 ? Math.min(100, (botValue / totalValue) * 100) : 0;
+          return (
+            <div className="pf-value">
+              <div>
+                <span className="label">Estimated portfolio value</span>
+                <strong>
+                  {totalValue > 0 ? `${totalValue.toLocaleString('en-US', { maximumFractionDigits: 2 })} ASE` : '—'}
+                </strong>
+                <small>
+                  Wallet balances at the current AMM spot plus ASE held by your contracts. Token inventory still
+                  inside a contract is not marked to market here.
+                </small>
+              </div>
+              <div className="pf-value-side">
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                  <span className="label">Deployed</span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-2)' }}>
+                    {deployedPct.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="alloc-bar" style={{ marginTop: 8 }}>
+                  <span style={{ width: `${Math.max(0.5, deployedPct)}%`, background: 'var(--accent)' }} />
+                </div>
+                <div className="pf-value-split">
+                  <span>Wallet <b className="mono">{allocation.total.toLocaleString('en-US', { maximumFractionDigits: 2 })}</b></span>
+                  <span>In bots <b className="mono">{botValue.toLocaleString('en-US', { maximumFractionDigits: 2 })}</b></span>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         <div className="balance-hero">
           <div>
             <span className="label">ASE in wallet</span>
             <strong>{nativeHolding ? nativeHolding.balanceFmt : '—'}</strong>
-            <small>native balance ready to trade</small>
-          </div>
-          <div>
-            <span className="label">Bots running</span>
-            <strong>{runningBots}</strong>
-            <small>{userStrategies.length} total · {botsToFinish > 0 ? `${botsToFinish} unarmed` : 'all armed'}</small>
+            <small>Native balance ready to trade</small>
           </div>
           <div>
             <span className="label">Capital in bots</span>
             <strong style={{ color: totalAseInBots > 0n ? 'var(--accent)' : undefined }}>
               {totalAseInBots > 0n ? fmtWei(totalAseInBots, 2) : '0 ASE'}
             </strong>
-            <small>locked inside active contracts</small>
+            <small>Locked inside active contracts</small>
           </div>
           <div>
             <span className="label">Gross proceeds</span>
             <strong style={{ color: totalGrossProceeds > 0n ? 'var(--up)' : undefined }}>
               {totalGrossProceeds > 0n ? fmtWei(totalGrossProceeds, 2) : '0 ASE'}
             </strong>
-            <small>total ASE received from fills</small>
+            <small>Total ASE received from fills</small>
+          </div>
+          <div>
+            <span className="label">Bots running</span>
+            <strong>{runningBots}</strong>
+            <small>
+              {userStrategies.length} total · {botsToFinish > 0 ? `${botsToFinish} unarmed` : 'all armed'}
+            </small>
           </div>
         </div>
 
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginTop: 16 }}>
-          <span className="live-dot">connected</span>
-          <span className="mono" style={{ fontSize: 13 }}>{shortAddr(ase1Addr, 14, 8)}</span>
-          <button type="button" className="btn btn-ghost" style={{ padding: '3px 10px', fontSize: 12 }} onClick={() => copyAddress(ase1Addr)}>
-            {copiedAddr ? 'Copied' : 'Copy'}
-          </button>
-          <a href={explorerAddressUrl(hexAddr)} target="_blank" rel="noreferrer" className="btn btn-ghost" style={{ padding: '3px 10px', fontSize: 12 }}>
-            Explorer ↗
-          </a>
-          <button type="button" className="btn btn-ghost" style={{ padding: '3px 10px', fontSize: 12 }} onClick={refreshHoldings} disabled={loadingHoldings}>
-            {loadingHoldings ? 'Refreshing…' : 'Refresh balances'}
-          </button>
-        </div>
+        {holdings.length > 0 && allocation.total > 0 && (
+          <div className="alloc" style={{ marginTop: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 16 }}>
+              <span className="label">Estimated allocation</span>
+              <span className="mono" style={{ fontSize: 11, color: 'var(--dim)' }}>
+                {allocation.total.toLocaleString('en-US', { maximumFractionDigits: 2 })} ASE at current pool spot
+              </span>
+            </div>
+            <div className="alloc-bar">
+              {allocation.rows.map((row, index) => (
+                <span
+                  key={row.holding.token}
+                  style={{
+                    width: `${Math.max(1, (row.valueAse / allocation.total) * 100)}%`,
+                    background: ALLOC_COLORS[index % ALLOC_COLORS.length],
+                  }}
+                  title={`${row.holding.symbol} · ${((row.valueAse / allocation.total) * 100).toFixed(1)}%`}
+                />
+              ))}
+            </div>
+            <div className="alloc-legend">
+              {allocation.rows.slice(0, 6).map((row, index) => (
+                <span key={row.holding.token}>
+                  <i style={{ background: ALLOC_COLORS[index % ALLOC_COLORS.length] }} />
+                  {row.holding.symbol} {((row.valueAse / allocation.total) * 100).toFixed(1)}%
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
 
-        <div className="mode-switch" role="tablist" aria-label="Portfolio sections" style={{ marginTop: 26 }}>
+        <div className="mode-switch" role="tablist" aria-label="Portfolio sections">
           <button type="button" role="tab" aria-selected={activeTab === 'tokens'} className={activeTab === 'tokens' ? 'mode-option active' : 'mode-option'} onClick={() => setActiveTab('tokens')}>
-            <span>My tokens ({tokenHoldings.length + (nativeHolding ? 1 : 0)})</span>
+            <span>Assets ({tokenHoldings.length + (nativeHolding ? 1 : 0)})</span>
             <small>Wallet balances</small>
           </button>
           <button type="button" role="tab" aria-selected={activeTab === 'bots'} className={activeTab === 'bots' ? 'mode-option active' : 'mode-option'} onClick={() => setActiveTab('bots')}>
-            <span>My bots ({userStrategies.length})</span>
+            <span>Bots ({userStrategies.length})</span>
             <small>Manage & withdraw</small>
           </button>
           <button type="button" role="tab" aria-selected={activeTab === 'activity'} className={activeTab === 'activity' ? 'mode-option active' : 'mode-option'} onClick={() => setActiveTab('activity')}>
@@ -246,29 +409,41 @@ export function Portfolio() {
         </div>
       </section>
 
-      <section className="wrap" style={{ paddingBottom: 90 }}>
+      <section className="wrap" style={{ paddingBottom: 96 }}>
         {activeTab === 'tokens' && (
           <div className="panel">
             <div className="panel-head">
               <div>
                 <span className="label">Wallet balances</span>
-                <p className="muted" style={{ marginTop: 3, fontSize: 13 }}>Start a bot straight from the token you already hold.</p>
+                <p className="muted" style={{ marginTop: 4 }}>
+                  Start a bot straight from the token you already hold.
+                </p>
               </div>
-              <Link to="/deploy" className="btn btn-primary" style={{ fontSize: 13 }}>+ Create a bot</Link>
+              <Link to="/deploy" className="btn btn-ghost btn-sm">
+                Create a bot
+              </Link>
             </div>
 
             {loadingHoldings && holdings.length === 0 ? (
-              <div className="panel-body muted">Scanning wallet balances on Asentum…</div>
+              <div className="panel-body">
+                <div style={{ display: 'grid', gap: 10 }}>
+                  {[0, 1, 2].map((row) => (
+                    <div className="skeleton" key={row} style={{ height: 38 }} />
+                  ))}
+                </div>
+                <p className="muted" style={{ fontSize: 12, marginTop: 12 }}>Scanning wallet balances on Asentum…</p>
+              </div>
             ) : holdings.length === 0 ? (
               <div className="panel-body">
                 <div className="empty-state">
-                  <h3 style={{ fontSize: 17, marginBottom: 8 }}>No balances found for this wallet</h3>
-                  <p style={{ fontSize: 14 }}>
+                  <h3>No balances found for this wallet</h3>
+                  <p style={{ fontSize: 13.5 }}>
                     Checked the native ASE balance and {allPools.length} live pool tokens across Auras and AseDex.
-                    If you expect a token here, use Refresh balances — a slow RPC read can leave a token out of the first pass.
-                    You need tokens to run a selling bot; DCA bots buy with ASE, so they work with an ASE balance alone.
+                    If you expect a token here, use Refresh balances — a slow RPC read can leave a token out of the
+                    first pass. You need tokens to run a selling bot; DCA bots buy with ASE, so they work with an
+                    ASE balance alone.
                   </p>
-                  <Link to="/deploy?template=dca" className="btn btn-primary" style={{ marginTop: 14 }}>
+                  <Link to="/deploy?template=dca" className="btn btn-primary btn-sm" style={{ marginTop: 10 }}>
                     Start a DCA bot →
                   </Link>
                 </div>
@@ -280,6 +455,7 @@ export function Portfolio() {
                     <tr>
                       <th>Asset</th>
                       <th>Balance</th>
+                      <th>Est. value</th>
                       <th>Venue</th>
                       <th style={{ textAlign: 'right' }}>Action</th>
                     </tr>
@@ -287,38 +463,52 @@ export function Portfolio() {
                   <tbody>
                     {nativeHolding && (
                       <tr>
-                        <td><strong>ASE</strong> <span className="muted" style={{ fontSize: 12 }}>· native</span></td>
-                        <td><strong>{nativeHolding.balanceFmt} ASE</strong></td>
+                        <td>
+                          <strong>ASE</strong> <span className="muted" style={{ fontSize: 11.5 }}>· native</span>
+                        </td>
+                        <td className="mono"><strong>{nativeHolding.balanceFmt} ASE</strong></td>
+                        <td className="mono">{nativeHolding.balanceFmt} ASE</td>
                         <td><span className="badge">Gas</span></td>
                         <td style={{ textAlign: 'right' }}>
-                          <Link to="/deploy?template=dca" className="btn btn-primary" style={{ padding: '5px 12px', fontSize: 13 }}>
-                            + Create DCA bot
+                          <Link to="/deploy?template=dca" className="btn btn-ghost btn-sm">
+                            Create DCA bot
                           </Link>
                         </td>
                       </tr>
                     )}
-                    {tokenHoldings.map((token) => (
-                      <tr key={token.token}>
-                        <td>
-                          <strong>{token.symbol}</strong>
-                          <a href={explorerAddressUrl(token.token)} target="_blank" rel="noreferrer" className="muted mono" style={{ fontSize: 11, marginLeft: 8 }}>
-                            {shortAddr(token.token)}
-                          </a>
-                        </td>
-                        <td><strong>{token.balanceFmt} {token.symbol}</strong></td>
-                        <td><span className="badge" style={{ textTransform: 'capitalize' }}>{token.venue}</span></td>
-                        <td style={{ textAlign: 'right' }}>
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            style={{ padding: '5px 12px', fontSize: 13 }}
-                            onClick={() => navigate(`/deploy?pool=${token.poolId}&venue=${token.venue === 'asedex' ? 'asepad' : 'strata'}&token=${token.token}`)}
-                          >
-                            + Create a bot
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {tokenHoldings.map((token) => {
+                      const pool = allPools.find((item) => item.id === token.poolId)
+                        ?? allPools.find((item) => item.token.toLowerCase() === token.token.toLowerCase());
+                      const estimated = pool ? token.balanceNum * Number(weiToAse(pool.spot, 6)) : null;
+                      return (
+                        <tr key={token.token}>
+                          <td>
+                            <strong>{token.symbol}</strong>
+                            <a href={explorerAddressUrl(token.token)} target="_blank" rel="noreferrer" className="muted mono" style={{ fontSize: 10.5, marginLeft: 8 }}>
+                              {shortAddr(token.token)}
+                            </a>
+                          </td>
+                          <td className="mono"><strong>{token.balanceFmt} {token.symbol}</strong></td>
+                          <td className="mono">
+                            {estimated === null
+                              ? <span className="dim">No live pool</span>
+                              : `${estimated.toLocaleString('en-US', { maximumFractionDigits: 2 })} ASE`}
+                          </td>
+                          <td>
+                            <span className="badge" style={{ textTransform: 'capitalize' }}>{token.venue}</span>
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => navigate(`/deploy?pool=${token.poolId}&venue=${token.venue === 'asedex' ? 'asepad' : 'strata'}&token=${token.token}`)}
+                            >
+                              Create a bot
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -331,16 +521,22 @@ export function Portfolio() {
             <div className="panel-head">
               <div>
                 <span className="label">My bots</span>
-                <p className="muted" style={{ marginTop: 3, fontSize: 13 }}>Open a bot to stop it, withdraw ASE or reclaim unsold tokens.</p>
+                <p className="muted" style={{ marginTop: 4 }}>
+                  Open a bot to stop it, withdraw ASE or reclaim unsold tokens.
+                </p>
               </div>
-              <Link to="/deploy" className="btn btn-primary" style={{ fontSize: 13 }}>+ New bot</Link>
+              <Link to="/deploy" className="btn btn-ghost btn-sm">
+                New bot
+              </Link>
             </div>
             <div className="panel-body">
               {userStrategies.length === 0 ? (
                 <div className="empty-state">
-                  <h3 style={{ fontSize: 17, marginBottom: 8 }}>No bots yet</h3>
-                  <p style={{ fontSize: 14 }}>Pick a strategy, set an amount and launch. Your wallet signs every step.</p>
-                  <Link to="/deploy" className="btn btn-primary" style={{ marginTop: 14 }}>Launch your first bot →</Link>
+                  <h3>No bots yet</h3>
+                  <p style={{ fontSize: 13.5 }}>Pick a strategy, set an amount and launch. Your wallet signs every step.</p>
+                  <Link to="/deploy" className="btn btn-primary btn-sm" style={{ marginTop: 10 }}>
+                    Launch your first bot →
+                  </Link>
                 </div>
               ) : (
                 <div className="bot-grid">
@@ -367,16 +563,7 @@ export function Portfolio() {
 
                         <div className="bot-facts">
                           <div><span>Plan</span><strong>{planLabel(strategy)}</strong></div>
-                          <div>
-                            <span>Amount</span>
-                            <strong>
-                              {strategy.template === 'dca'
-                                ? `${strategy.buyBudgetAse || strategy.budget || '—'} ASE`
-                                : strategy.template === 'grid'
-                                  ? `${strategy.budget || '—'} ${strategy.tokenSymbol || ''}${strategy.buyBudgetAse ? ` + ${strategy.buyBudgetAse} ASE` : ''}`
-                                  : strategy.budget ? `${strategy.budget} ${strategy.tokenSymbol ?? ''}` : '—'}
-                            </strong>
-                          </div>
+                          <div><span>Amount</span><strong>{amountLabel(strategy)}</strong></div>
                           <div><span>Cadence</span><strong>{everyLabel(strategy.interval)}</strong></div>
                           <div>
                             <span>Progress</span>
@@ -429,24 +616,44 @@ export function Portfolio() {
                         </div>
 
                         {strategy.status === 'deployed' && (
-                          <div className="notice" style={{ borderLeftColor: '#e8b84b', background: 'rgba(232, 184, 75, 0.08)' }}>
-                            <strong style={{ color: '#e8b84b' }}>Setup incomplete (unarmed)</strong>
-                            <p style={{ margin: '4px 0 8px', fontSize: 12.5 }}>The contract is on-chain but its schedule was not started.</p>
-                            <Link to={`/strategies/${strategy.address}`} className="btn btn-primary" style={{ padding: '4px 10px', fontSize: 12 }}>
+                          <div className="notice" style={{ borderLeftColor: 'var(--warn)', background: 'var(--warn-soft)' }}>
+                            <strong style={{ color: 'var(--warn)' }}>Setup incomplete (unarmed)</strong>
+                            <span>The contract is on-chain but its schedule was not started.</span>
+                            <Link to={`/strategies/${strategy.address}`} className="link-arrow" style={{ marginTop: 6 }}>
                               Finish setup & arm bot →
                             </Link>
                           </div>
                         )}
 
+                        {botNotice[strategy.address] && (
+                          <p
+                            role={botNotice[strategy.address].kind === 'err' ? 'alert' : 'status'}
+                            className={botNotice[strategy.address].kind === 'err' ? 'swap-note down' : 'swap-note muted'}
+                            style={{ margin: '0 0 10px' }}
+                          >
+                            {botNotice[strategy.address].text}
+                          </p>
+                        )}
+
                         <div className="bot-actions">
-                          <Link to={`/strategies/${strategy.address}`} className="btn btn-primary" style={{ fontSize: 12.5 }}>
+                          <Link to={`/strategies/${strategy.address}`} className="btn btn-primary">
                             Manage bot
                           </Link>
-                          <Link to={`/strategies/${strategy.address}`} className="btn btn-ghost" style={{ fontSize: 12.5 }}>
-                            Stop / Withdraw
+                          {liveMatch?.stopped !== true && strategy.status !== 'failed' && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              disabled={stopping === strategy.address}
+                              onClick={() => void stopBot(strategy)}
+                            >
+                              {stopping === strategy.address ? 'Stopping…' : 'Stop bot'}
+                            </button>
+                          )}
+                          <Link to={`/strategies/${strategy.address}`} className="btn btn-ghost">
+                            Withdraw
                           </Link>
-                          <a className="btn btn-ghost" href={explorerAddressUrl(strategy.address)} target="_blank" rel="noreferrer" style={{ fontSize: 12.5, flex: '0 0 auto', padding: '0 10px' }}>
-                            Explorer ↗
+                          <a className="btn btn-ghost" href={explorerAddressUrl(strategy.address)} target="_blank" rel="noreferrer" style={{ flex: '0 0 auto', padding: '0 10px' }}>
+                            ↗
                           </a>
                         </div>
                       </div>
@@ -463,12 +670,23 @@ export function Portfolio() {
             <div className="panel-head">
               <div>
                 <span className="label">Transaction activity</span>
-                <p className="muted" style={{ marginTop: 3, fontSize: 13 }}>Deployments, starts, deposits and withdrawals from this wallet.</p>
+                <p className="muted" style={{ marginTop: 4 }}>
+                  Deployments, starts, deposits and withdrawals from this wallet.
+                </p>
               </div>
+              <Link to="/activity" className="btn btn-ghost btn-sm">
+                Network activity
+              </Link>
             </div>
             {userTxs.length === 0 ? (
               <div className="panel-body">
-                <div className="empty-state">No transactions recorded in this browser yet.</div>
+                <div className="empty-state">
+                  <h3>No transactions recorded yet</h3>
+                  <p style={{ fontSize: 13.5 }}>
+                    This list is built from the transactions this browser recorded for your wallet. Deploy a bot
+                    and each signed step appears here.
+                  </p>
+                </div>
               </div>
             ) : (
               <div className="table-scroll">
@@ -479,23 +697,33 @@ export function Portfolio() {
                       <th>Action</th>
                       <th>Transaction</th>
                       <th>Status</th>
+                      <th>Contract</th>
                     </tr>
                   </thead>
                   <tbody>
                     {userTxs.map((tx) => (
                       <tr key={tx.hash}>
-                        <td className="muted" style={{ fontSize: 12 }}>{new Date(tx.timestamp).toLocaleTimeString()}</td>
+                        <td className="mono dim" style={{ fontSize: 11 }}>
+                          {new Date(tx.timestamp).toLocaleString('en-US', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        </td>
                         <td><strong>{tx.description}</strong></td>
-                        <td className="mono" style={{ fontSize: 12 }}>
-                          <a href={explorerTxUrl(tx.hash)} target="_blank" rel="noreferrer">{shortAddr(tx.hash)} ↗</a>
+                        <td className="mono" style={{ fontSize: 11 }}>
+                          <a href={explorerTxUrl(tx.hash)} target="_blank" rel="noreferrer" className="wallet-link">
+                            {shortAddr(tx.hash)} ↗
+                          </a>
                         </td>
                         <td>
-                          {tx.status === 'confirmed' ? (
-                            <span className="badge" style={{ color: 'var(--up)', borderColor: 'var(--up)' }}>Confirmed</span>
-                          ) : tx.status === 'pending' ? (
-                            <span className="badge" style={{ color: '#e8b84b', borderColor: '#e8b84b' }}>Pending</span>
+                          <span className={tx.status === 'confirmed' ? 'status-badge live' : tx.status === 'pending' ? 'status-badge pending' : 'status-badge off'}>
+                            {tx.status}
+                          </span>
+                        </td>
+                        <td className="mono" style={{ fontSize: 11 }}>
+                          {tx.strategyAddress ? (
+                            <Link to={`/strategies/${tx.strategyAddress}`} className="wallet-link">
+                              {shortAddr(tx.strategyAddress)}
+                            </Link>
                           ) : (
-                            <span className="badge" style={{ color: 'var(--down)', borderColor: 'var(--down)' }}>Failed</span>
+                            <span className="dim">—</span>
                           )}
                         </td>
                       </tr>

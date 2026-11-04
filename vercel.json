@@ -2,5 +2,8 @@
   "framework": "vite",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "rewrites": [
+    { "source": "/api/explorer/:path*", "destination": "https://explorer.asentum.com/api/:path*" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
 }

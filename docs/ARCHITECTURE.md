@@ -280,3 +280,33 @@ For more information, see:
 - [README.md](../README.md)
 - [CONTRIBUTING.md](../CONTRIBUTING.md)
 - [Asentum Documentation](https://www.asentum.com/docs)
+
+## Protocol statistics, status semantics, and provenance
+
+The public dashboard is a read-only projection of Asentum chain data. The shared accounting implementation is `src/lib/protocol.ts`; contract discovery and status fields are supplied by `src/lib/registry.ts`, while RPC/indexer access is implemented in `src/lib/rpc.ts`. UI pages should consume this shared snapshot rather than independently deriving totals.
+
+### Strategy status buckets
+
+For verified strategies, the dashboard uses mutually exclusive status buckets:
+
+- **Active / scheduled:** `cron !== null` and `stopped !== true`.
+- **Paused:** `stopped === true`, regardless of whether a cron record remains attached.
+- **Idle:** verified total minus active minus paused (a contract with no active schedule and not explicitly stopped).
+
+Thus `Total Bots = Active + Paused + Idle`. “Scheduled” is the active scheduled subset, not a count of paused contracts with a stale cron reference. Unverified discoveries are not included in these verified bot counts.
+
+### Executions and gross ASE
+
+Execution counts and ASE amounts are sourced from verified contract swap/fill events and contract accounting fields. The shared protocol snapshot aggregates strategy `trades`, indexed fill receipts, `realisedWei`, `spentAseWei`, and `markValueAseWei`; token quantities retain their own token decimals and are not summed across assets. **Gross ASE received is gross token-to-ASE proceeds, not net profit or ROI.** It excludes a verified cost basis and must not be labeled as profit. Open inventory is a live AMM quote and can change with pool prices and liquidity.
+
+### Compass
+
+Compass markers represent verified strategies from the same protocol snapshot. Marker details are sourced from each strategy's name, template, symbol, stop/cron state, trade count, and indexed fill timestamps. “Last execution” is the most recent indexed fill timestamp available to that strategy; “Next run” is derived from the cron record's `nextRunAt` (seconds or milliseconds). Missing chain fields are displayed as unavailable rather than fabricated. The visual clock/countdown is presentation only and does not trigger an execution.
+
+### Analytics versus Leaderboard
+
+Analytics is a protocol-level time-series view: it applies a selected range to indexed fill timestamps and groups executions and ASE volume into buckets, with pair activity/strategy distribution. Leaderboard is a ranking view: verified strategy rows are sorted by selected measurable values (fills, gross ASE, inventory mark, or last fill), with creator/strategy identity and links to contract detail. These are separate projections of the same underlying indexed source, not separate sources of truth. No profitability ranking is claimed without a trustworthy cost basis.
+
+### Data limitations
+
+Indexer coverage and timestamp availability can bound historical views. A stale snapshot may be shown after a refresh error; the UI should label it as stale. Missing timestamps cannot be reliably assigned to a time-window chart. Contract/source verification is an integrity check and is not a security audit or guarantee of strategy performance.
