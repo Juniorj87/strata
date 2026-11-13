@@ -58,6 +58,19 @@ function NavIcon({ name }: { name: string }) {
           <path d="M8 16v-4M12 16V8M16 16v-6M20 16V6" />
         </svg>
       );
+    case 'advanced':
+      return (
+        <svg {...common}>
+          <path d="M7 5v14M7 9h3v6H7zM14 4v16M14 11h3v5h-3z" />
+        </svg>
+      );
+    case 'token':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="8" />
+          <path d="M12 8v8M9.5 10.2c0-1 1.1-1.7 2.5-1.7s2.5.7 2.5 1.7-1.1 1.6-2.5 1.8-2.5.8-2.5 1.8 1.1 1.7 2.5 1.7 2.5-.7 2.5-1.7" />
+        </svg>
+      );
     default:
       return (
         <svg {...common}>
@@ -68,27 +81,23 @@ function NavIcon({ name }: { name: string }) {
   }
 }
 
+// Analytics, Leaderboard and Activity are three tabs of one Explore view;
+// keeping all three in the top bar duplicated the same switch twice.
 const nav = [
-  { to: '/strategies', label: 'Strategies', icon: 'strategies' },
   { to: '/swap', label: 'Swap', icon: 'swap' },
-  { to: '/analytics', label: 'Analytics', icon: 'analytics' },
+  { to: '/advanced', label: 'Advanced', icon: 'advanced' },
+  { to: '/strategies', label: 'Strategies', icon: 'strategies' },
   { to: '/portfolio', label: 'Portfolio', icon: 'portfolio' },
-  { to: '/leaderboard', label: 'Leaderboard', icon: 'leaderboard' },
   { to: '/activity', label: 'Activity', icon: 'activity' },
-  { to: '/how', label: 'Docs', icon: 'docs' },
 ];
 
 const REPO = 'https://github.com/Juniorj87/strata';
 
-function TwitterIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
-      <path
-        fill="currentColor"
-        d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"
-      />
-    </svg>
-  );
+const EXPLORE_PATHS = new Set(['/analytics', '/leaderboard', '/activity']);
+
+/** Explore covers its three tabs, so it stays highlighted on any of them. */
+function isNavActive(to: string, path: string, isActive: boolean): boolean {
+  return isActive || (to === '/analytics' && EXPLORE_PATHS.has(path));
 }
 
 function GitHubIcon() {
@@ -100,6 +109,10 @@ function GitHubIcon() {
       />
     </svg>
   );
+}
+
+function XIcon() {
+  return <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M18.9 2H22l-6.8 7.8L23.2 22h-6.3L12 14.6 5.5 22H2.3l7.3-8.4L1.8 2h6.5l4.4 6.9L18.9 2Zm-1.1 18h1.7L7.3 3.9H5.5L17.8 20Z"/></svg>;
 }
 
 function SunIcon() {
@@ -170,7 +183,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
           <nav className="nav" aria-label="Primary">
             {nav.map((item) => (
-              <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? 'active' : '')}>
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) => (isNavActive(item.to, location.pathname, isActive) ? 'active' : '')}
+              >
                 <NavIcon name={item.icon} />
                 {item.label}
               </NavLink>
@@ -238,7 +255,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
         <div className={menuOpen ? 'mobile-nav open' : 'mobile-nav'}>
           {nav.map((item) => (
-            <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? 'active' : '')}>
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) => (isNavActive(item.to, location.pathname, isActive) ? 'active' : '')}
+            >
               <NavIcon name={item.icon} />
               {item.label}
             </NavLink>
@@ -276,13 +297,21 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
             <div className="footer-col">
               <span className="label">Product</span>
-              <Link to="/strategies">Strategy catalog</Link>
-              <Link to="/deploy">Create a bot</Link>
               <Link to="/swap">Swap</Link>
-              <Link to="/analytics">Analytics</Link>
+              <Link to="/advanced">Advanced Trading</Link>
+              <Link to="/strategies">Strategy catalog</Link>
+              <Link to="/create-token">Create Token</Link>
+              <Link to="/deploy">Launch a bot</Link>
               <Link to="/portfolio">Portfolio</Link>
-              <Link to="/leaderboard">Leaderboard</Link>
               <Link to="/activity">Activity</Link>
+            </div>
+
+            <div className="footer-col">
+              <span className="label">Explore</span>
+              <Link to="/analytics">Overview</Link>
+              <Link to="/leaderboard">Wallet leaderboard</Link>
+              <Link to="/how">Documentation</Link>
+              <Link to="/deploy?mode=pro">Pro mode</Link>
             </div>
 
             <div className="footer-col">
@@ -304,9 +333,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <a href="https://auras.finance" target="_blank" rel="noreferrer">
                 Auras Finance ↗
               </a>
-              <a href="https://asepad.fun" target="_blank" rel="noreferrer">
-                AsePad / AseDex ↗
-              </a>
+              <a href="https://asepad.fun" target="_blank" rel="noreferrer">AsePad / AseDex ↗</a>
+              <span className="muted">Primary market data: Auras · additional venue: AseDex</span>
               <a href="https://explorer.asentum.com" target="_blank" rel="noreferrer">
                 Explorer ↗
               </a>
@@ -316,18 +344,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <div className="footer-bottom">
             <span>Strata · experimental testnet software, not investment advice.</span>
             <div className="footer-socials">
-              <a className="social-link" href={REPO} target="_blank" rel="noreferrer" aria-label="Strata on GitHub" title="GitHub">
-                <GitHubIcon />
-              </a>
-              <a
-                className="social-link"
-                href="#"
-                onClick={(event) => event.preventDefault()}
-                aria-label="Strata on X (Twitter)"
-                title="X / Twitter — coming soon"
-              >
-                <TwitterIcon />
-              </a>
+              <a className="social-link" href={REPO} target="_blank" rel="noreferrer" aria-label="Strata on GitHub" title="GitHub"><GitHubIcon /></a>
+              <a className="social-link" href="https://x.com/search?q=StrataDEX" target="_blank" rel="noreferrer" aria-label="Find Strata on X" title="Strata on X"><XIcon /></a>
             </div>
             <span className="mono">chain 1423 · ASE native</span>
           </div>

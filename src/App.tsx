@@ -11,6 +11,8 @@ import { Activity } from './pages/Activity';
 import { Portfolio } from './pages/Portfolio';
 import { Marketplace } from './pages/Marketplace';
 import { Swap } from './pages/Swap';
+import { AdvancedTrading } from './pages/AdvancedTrading';
+import { CreateToken } from './pages/CreateToken';
 
 export default function App() {
   return (
@@ -19,6 +21,8 @@ export default function App() {
         <Route path="/" element={<Home />} />
         <Route path="/deploy" element={<Deploy />} />
         <Route path="/swap" element={<Swap />} />
+        <Route path="/advanced" element={<AdvancedTrading />} />
+        <Route path="/create-token" element={<CreateToken />} />
         <Route path="/portfolio" element={<Portfolio />} />
         <Route path="/strategies" element={<Strategies />} />
         <Route path="/strategies/:address" element={<StrategyDetail />} />

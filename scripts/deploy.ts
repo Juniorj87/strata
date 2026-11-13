@@ -18,7 +18,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const RPC = process.env.STRATA_RPC ?? 'https://testnet.asentum.com';
+const RPC = process.env.STRATA_RPC ?? 'https://explorer.asentum.com';
 const STRATA_HUB = process.env.STRATA_HUB_ADDRESS || 'ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut';
 const CONFIG_PATH = resolve(ROOT, 'src/config/strategies.json');
 const SEED_PATH = resolve(ROOT, '.strata/seed.json');
@@ -127,8 +127,8 @@ function parseArgs(argv: string[]): Args {
   const ammAddress = rawAmm === 'asedex' || rawAmm === 'asepad'
     ? '0xc3833b73eb30242289e533b3e97c4b72b97e24e9'
     : rawAmm === 'auras' || rawAmm === 'strata'
-    ? '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd'
-    : flags.amm || '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+    ? '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2'
+    : flags.amm || '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
 
   const template = flags.template ?? 'momentum-signal';
   const dryRun = flags['dry-run'] === 'true';

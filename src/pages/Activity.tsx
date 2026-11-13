@@ -89,16 +89,16 @@ export function Activity() {
         </p>
         <div className="mode-switch" role="tablist" style={{ marginTop: 22 }}>
           <Link to="/analytics" className="mode-option">
-            <span>Protocol analytics</span>
+            <span>Overview</span>
             <small>Volume & executions</small>
           </Link>
           <Link to="/activity" className="mode-option active">
-            <span>Activity ledger</span>
+            <span>Fills</span>
             <small>Every indexed fill</small>
           </Link>
           <Link to="/leaderboard" className="mode-option">
-            <span>Strategy leaderboard</span>
-            <small>Ranked strategies</small>
+            <span>Leaderboard</span>
+            <small>Wallets ranked</small>
           </Link>
         </div>
       </section>
@@ -110,7 +110,7 @@ export function Activity() {
           <button type="button" className="chip" onClick={protocol.refresh}>
             Refresh
           </button>
-          <span className="mono" style={{ fontSize: 10.5, color: 'var(--dim)' }}>
+          <span className="mono" style={{ fontSize: 13.5, color: 'var(--dim)' }}>
             auto · 30s
           </span>
         </div>
@@ -183,7 +183,7 @@ export function Activity() {
                 </button>
                 <select
                   className="input"
-                  style={{ height: 30, width: 190, fontSize: 11.5 }}
+                  style={{ height: 40, width: 210, maxWidth: '100%', fontSize: 14.5 }}
                   value={tokenFilter}
                   onChange={(event) => {
                     setTokenFilter(event.target.value);
@@ -200,7 +200,7 @@ export function Activity() {
                 </select>
                 <select
                   className="input"
-                  style={{ height: 30, width: 210, fontSize: 11.5 }}
+                  style={{ height: 40, width: 230, maxWidth: '100%', fontSize: 14.5 }}
                   value={strategyFilter}
                   onChange={(event) => {
                     setStrategyFilter(event.target.value);
@@ -217,7 +217,7 @@ export function Activity() {
                 </select>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span className="mono" style={{ fontSize: 10.5, color: 'var(--dim)' }}>
+                <span className="mono" style={{ fontSize: 13.5, color: 'var(--dim)' }}>
                   {visible.length} rows
                 </span>
                 <button type="button" className="chip" onClick={protocol.refresh}>
@@ -368,7 +368,7 @@ export function Activity() {
               <div className="panel-head">
                 <span className="label">Your transactions</span>
                 {wallet.connected ? (
-                  <Link to="/portfolio" className="link-arrow" style={{ fontSize: 11 }}>
+                  <Link to="/portfolio" className="link-arrow" style={{ fontSize: 13 }}>
                     Portfolio →
                   </Link>
                 ) : (
@@ -413,7 +413,7 @@ export function Activity() {
               </div>
             </div>
 
-            <p className="muted" style={{ fontSize: 11, lineHeight: 1.7 }}>
+            <p className="muted" style={{ fontSize: 13.5, lineHeight: 1.7 }}>
               Fills are read from the transfers of verified strategy contracts, resolved against the swap receipt of
               the same transaction. Timestamps come from the receipt, so every row shows the real execution time.
               {truncated ? ' Some fills predate the index window and show — instead of a time.' : ''}{' '}

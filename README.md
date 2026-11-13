@@ -7,7 +7,7 @@
 [![Live App](https://img.shields.io/badge/Live%20App-stratadex.site-00d5c8?style=for-the-badge&logo=vercel)](https://stratadex.site/)
 [![Chain](https://img.shields.io/badge/Chain-Asentum%201423%20Testnet-00d5c8?style=for-the-badge)](https://explorer.asentum.com)
 [![Architecture](https://img.shields.io/badge/Architecture-100%25%20Decentralized%20·%20No%20Backend-8957e5?style=for-the-badge)](#-security--privacy)
-[![Privacy](https://img.shields.io/badge/Privacy-Zero%20Data%20Collection-green?style=for-the-badge)](#-privacy-and-user-protection)
+[![Privacy](https://img.shields.io/badge/Privacy-No%20Server%20Wallet%20DB-green?style=for-the-badge)](#-privacy-and-user-protection)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
 <br/>
@@ -44,9 +44,10 @@ Strata interacts with the following verified protocol contracts on the **Asentum
 | Parameter / Contract | Address / Value | Details |
 |---|---|---|
 | **Network** | Asentum Testnet | Chain ID: `1423` (2s block time) |
-| **Public RPC Gateway** | `https://testnet.asentum.com` | Direct CORS-enabled JSON-RPC endpoint |
+| **Public RPC Gateway** | `https://explorer.asentum.com` | Official Asentum testnet RPC / node API (chain ID 1423) |
 | **Block Explorer** | `https://explorer.asentum.com` | Official Asentum ledger & block explorer |
-| **Auras AMM Contract** | [`0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd`](https://explorer.asentum.com/address/0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd) | Core decentralized exchange & TWAP oracle |
+| **Auras AMM v2 (live)** | [`0xcc1c9029cfe92004bca76c013cef2fdaa75351a2`](https://explorer.asentum.com/address/0xcc1c9029cfe92004bca76c013cef2fdaa75351a2) | Current Auras pools, quotes and swaps (shipped 10 Nov 2026) |
+| **Auras AMM v1 (legacy)** | [`0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd`](https://explorer.asentum.com/address/0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd) | Old pools; only LPs that have not migrated still trade there |
 | **Protocol Cron Registry** | `0x0000000000000000000000000000000000000006` | Built-in system contract for autonomous scheduling |
 | **Native ASE Sentinel** | `0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee` | Standard identifier for the native ASE asset leg |
 | **Strata Hub Contract** | [`ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut`](https://explorer.asentum.com/address/ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut) | Canonical protocol contract for strategy registration, escrow, & airdrop telemetry |
@@ -88,10 +89,17 @@ Strata interacts with the following verified protocol contracts on the **Asentum
 
 ## 🛡️ Privacy and User Protection
 
-### 🔒 Zero Wallet Data Collection
-- **No Database, No Logs:** Strata does **NOT** collect, record, track, or share connected wallet addresses, balances, or transaction activities.
+### 🔒 No Server-Side Wallet Database
+- **No backend database:** Strata has **no database, no account API and no server-side wallet table**, so there is no endpoint that can list users' addresses.
+- **Local bookkeeping only:** Strategies deployed from this browser are kept in `localStorage`, keyed by the owner address, so the app can show its own deployments. Swap history is local too. This data never leaves the browser and can be cleared by the user.
+- **Optional wallet registry:** Portfolio has an opt-in registry that remembers public addresses in this browser only. It is off by default, states its purpose, and deletes every entry when switched off. It never stores keys, seeds, balances or activity. See `src/lib/walletRegistry.ts`.
 - **Zero Analytics / Telemetry:** No third-party trackers, Google Analytics, cookies, or user fingerprinting scripts are embedded.
-- **Client-Side Only:** All blockchain queries are initiated directly from your browser to `https://testnet.asentum.com` via open CORS. There is no middleman backend or proxy server capable of recording your requests.
+- **Client-Side Only:** All chain queries go directly to the official Asentum RPC at `https://explorer.asentum.com`; Auras market pairs, candles and trade tape come from the Auras indexer at `https://auras.asentum.com`. The explorer API is reached through a read-only same-origin proxy (`/api/explorer`) because it sends no CORS headers; that proxy does not log or store address data in this app.
+
+### 🧾 Optional Wallet Registry
+- No server-side wallet database exists in this app.
+- The optional Wallet Registry is disabled by default and stores only public addresses in the current browser after explicit opt-in.
+- Opting out clears the saved list. No keys, seed phrases or signatures are stored.
 
 ### 🔑 Non-Custodial Architecture
 - **Keys Never Leave Your Device:** Connections occur via `@asentum/connect` using either the official Chrome extension or the Telegram wallet bot.
@@ -103,22 +111,26 @@ Strata interacts with the following verified protocol contracts on the **Asentum
 
 ## 📊 Core Strategy Archetypes
 
-Strata supports multiple algorithmic models deployed as autonomous contracts:
+The current app exposes eight on-chain templates. The five guided templates are available in Lite; the remaining three are Pro-only.
 
-| Strategy | Execution Interval | Logic & Mechanism | Funding |
-|---|---|---|---|
-| **Momentum Signal** | 60 sec | Evaluates AMM TWAP drift and emits on-chain trading signals (`buy` / `sell` / `hold`) | Gas Escrow only |
-| **Momentum Trader** | 60 sec | Listens to TWAP momentum; automatically executes token-side swaps when threshold is reached | Gas + ARC-20 Tokens |
-| **DCA (Dollar-Cost Averaging)** | 3,600 sec | Executes fixed-notional purchases at regular time intervals regardless of short-term volatility | Gas + ARC-20 Tokens |
-| **Grid Trading** | 60 sec | Maintains multi-level layered buy and sell orders around a baseline price band | Gas + ARC-20 Tokens |
-| **TWAP Order Slicer** | 300 sec | Breaks large order sizes into smaller discrete legs over time to minimize price impact | Gas + ARC-20 Tokens |
-| **Mean Reversion** | 120 sec | Sells into overextended upward price deviations and accumulates during oversold dips | Gas + ARC-20 Tokens |
+| Strategy | Default cadence | Direction / behaviour | Funding |
+|---|---:|---|---|
+| **Momentum Signal** | 60 sec | Signal only; compares TWAP windows and emits buy / sell / hold. No trade. | Cron gas escrow |
+| **Momentum Trader** | 60 sec | Sells the selected ARC-20 token into ASE when its momentum condition is met. | Token allocation + escrow |
+| **Grid** | 60 sec | Two-sided AMM grid: token inventory for sells and ASE reserve for buys. | Tokens + ASE reserve + escrow |
+| **TWAP Slicer** | 300 sec | Splits one token-to-ASE sale into timed atomic swaps. | Token allocation + escrow |
+| **DCA** | 3,600 sec | Repeated ASE-to-token spot buys until the budget is used. | ASE buy budget + escrow |
+| **Risk-managed Trader** | 300 sec | Scheduled, sell-only spot strategy with stop-loss, take-profit and drawdown checks. | Token allocation + escrow |
+| **Limit Sell Trigger** | 60 sec | One scheduled reduce-only sale when the pool price reaches the trigger; not a resting order-book order. | Token allocation + escrow |
+| **Scale Order** | 60 sec | Scheduled reduce-only sales across price levels; not a resting order-book order. | Token allocation + escrow |
+
+Cadence is the on-chain schedule, not a continuous price feed. Asentum Cron supports a minimum interval of 60 seconds. Price triggers are checked only when a scheduled run executes.
 
 ---
 
 ## 🖥️ Web Application Features
 
-The live application at [**strata-dapp.vercel.app**](https://strata-dapp.vercel.app) provides a comprehensive terminal for on-chain automated strategies:
+The live application at [**stratadex.site**](https://stratadex.site) provides a comprehensive terminal for on-chain automated strategies:
 
 ### 1. Live Dashboard & AMM Tape
 - Real-time block heights (finalized head and tip).
@@ -127,14 +139,30 @@ The live application at [**strata-dapp.vercel.app**](https://strata-dapp.vercel.
 
 ![Strata Dashboard](docs/screenshots/home.png)
 
-### 2. Strategy Registry & Hash Verifier
+### 2. Advanced Trading
+
+The Spot ticket supports Market, supported Auras v2 escrowed Limit orders, and Bot mode. Bot mode deploys an existing spot strategy contract for the selected pool. Stop-loss/take-profit are scheduled spot exit conditions, not Perps positions. Chart controls include EMA 20/50 and locally saved horizontal price levels. Perps (long/short, leverage, margin and liquidation) remain a separate unavailable integration until a real venue publishes its contract/API. This is not an AseDex-only limitation: both Auras and AseDex are spot AMMs, not derivatives engines.
+
+- Pair selector over live ASE pools, with indexed 24h price, volume and liquidity.
+- Candlestick chart from real indexed Swap events: 1m, 5m, 15m, 30m (2×15m), 1h, 4h, 1d and 1w (7×1d). Zoom, pan, hover OHLC and volume.
+- Market orders are quoted by the AMM contract and signed by the wallet with a minimum-output guard.
+- Limit orders are genuine escrowed Auras v2 orders (`createLimitOrder` / `cancelLimitOrder`), filled against the pool by cron. They are not presented as an order book, and AseDex / legacy Auras v1 pools are market-order only because the module is deployed beside Auras v2.
+- Every chart and price is normalised to ASE per token, including pools where ASE is token0.
+- Open orders, balances and the live trade tape are read from chain state / the Auras indexer. The selected on-chain pool ID and venue are carried into the bot builder so a bot can be created for the market being viewed.\n- Perpetuals show an explicit "not connected" status; no perp price or position is simulated.
+
+### 3. Create Token
+- Deploys a fixed-supply ARC-20 contract, then calls `init` once to mint the supply to the deployer.
+- Shows the contract address, both transaction hashes and a chain-read verification of name, symbol, decimals and supply.
+- A failed initialisation resumes against the same deployed address instead of deploying a second token.
+
+### 4. Strategy Registry & Hash Verifier
 - Automatic discovery of on-chain strategy contracts carrying the Strata signature.
 - Instant client-side **BLAKE3 source code verification** against on-chain bytecode hashes.
 - Real-time monitoring of contract token balances, remaining gas escrow, and execution history.
 
 ![Strata Strategy Registry](docs/screenshots/deploy.png)
 
-### 3. Interactive Mechanics & Visualizer (`/how`)
+### 5. Interactive Mechanics & Visualizer (`/how`)
 - Interactive threshold simulator demonstrating how price drift triggers `buy` / `hold` / `sell` signals in real time.
 - Documentation of Asentum VM execution limits and cross-contract calling rules (`E()` primitives).
 
@@ -147,41 +175,32 @@ The live application at [**strata-dapp.vercel.app**](https://strata-dapp.vercel.
 | Feature | Centralized Trading Bot | Strata On-Chain Strategy |
 |---|---|---|
 | **Execution Environment** | Centralized VPS / Home PC | Directly inside blockchain block creation |
-| **Uptime Guarantee** | Vulnerable to crashes, network loss, host downtime | 100% blockchain network uptime |
+| **Execution dependency** | Depends on the operator's server and network | Runs when the Asentum Cron Registry schedules it; chain congestion and failed runs still matter |
 | **Scheduler** | Server `cron` daemon or commercial keeper | Protocol-level system registry (`cron.schedule`) |
 | **Code Transparency** | Closed-source or private on a server | 100% public source code verified on-chain |
 | **Tamper Resistance** | Server owner can modify logic anytime | Code is immutable once deployed |
-| **Price Data Source** | External centralized APIs or private websockets | Auras AMM's native TWAP accumulators |
+| **Price Data Source** | External APIs or private websockets | Strategy-specific AMM reads/TWAP; chart candles come from indexed AMM Swap events |
 | **Security Risk** | API keys and private keys stored on server | Non-custodial, no server keys exist |
 
 ---
 
-## 🌐 Custom Domain Setup
+## 🧰 Local development
 
-### Current Configuration
+Requirements: Node.js 22+ and npm.
 
-**Domain:** `stratadex.site`
-
-**Status:** ✅ LIVE and working!
-
-**What was done:**
-1. Added domain `stratadex.site` to Vercel project via CLI
-2. Updated nameservers at domain registrar to:
-   - `ns1.vercel-dns.com`
-   - `ns2.vercel-dns.com`
-3. Vercel automatically configured DNS records (ALIAS to Vercel edge)
-4. Domain is now pointing to https://strata-dapp.vercel.app
-
-**Current state:**
-- ✅ Nameservers configured correctly
-- ✅ DNS records verified by Vercel
-- ✅ Domain alias pointing to production deployment
-- ✅ Site accessible at https://stratadex.site
-
-**Verification command:**
 ```bash
-vercel domains inspect stratadex.site
+npm ci
+npm run dev
+npm run typecheck
+npm run lint
+npm run build
+npm run test:strategies
+npm run test:trading
 ```
+
+The frontend is a static Vite/React app. It reads Asentum and market-indexer data from the browser and delegates transaction signing to the connected Asentum wallet. Live-chain transaction checks require testnet access and explicit wallet approval.
+
+For current feature behaviour and limitations, see [docs/PRODUCT_GUIDE.md](docs/PRODUCT_GUIDE.md). For system boundaries and data flow, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 

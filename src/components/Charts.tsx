@@ -150,7 +150,7 @@ export function SeriesChart({
               strokeWidth="1"
             />
             {axis && (
-              <text x={padLeft - 10} y={y(tick) + 3.5} textAnchor="end" fill="var(--dim)" fontSize="9.5" fontFamily="var(--font-mono)">
+              <text x={padLeft - 10} y={y(tick) + 3.5} textAnchor="end" fill="var(--dim)" fontSize="10" fontFamily="var(--font-mono)">
                 {format(tick)}
               </text>
             )}
@@ -169,10 +169,10 @@ export function SeriesChart({
 
         {(startLabel || endLabel) && (
           <>
-            <text x={padLeft} y={height - 6} fill="var(--dim)" fontSize="9.5" fontFamily="var(--font-mono)">
+            <text x={padLeft} y={height - 6} fill="var(--dim)" fontSize="10" fontFamily="var(--font-mono)">
               {startLabel}
             </text>
-            <text x={padLeft + innerW} y={height - 6} textAnchor="end" fill="var(--dim)" fontSize="9.5" fontFamily="var(--font-mono)">
+            <text x={padLeft + innerW} y={height - 6} textAnchor="end" fill="var(--dim)" fontSize="10" fontFamily="var(--font-mono)">
               {endLabel}
             </text>
           </>
@@ -190,7 +190,7 @@ export function SeriesChart({
             borderRadius: 3,
             background: 'var(--surface)',
             fontFamily: 'var(--font-mono)',
-            fontSize: 11,
+            fontSize: 12,
             color: 'var(--text)',
             pointerEvents: 'none',
             whiteSpace: 'nowrap',
@@ -264,7 +264,7 @@ export function ColumnChart({
           return (
             <g key={fraction}>
               <line x1={padLeft} x2={padLeft + innerW} y1={y} y2={y} stroke="var(--line-soft)" strokeWidth="1" />
-              <text x={padLeft - 8} y={y + 3.5} textAnchor="end" fill="var(--dim)" fontSize="9" fontFamily="var(--font-mono)">
+              <text x={padLeft - 8} y={y + 3.5} textAnchor="end" fill="var(--dim)" fontSize="10" fontFamily="var(--font-mono)">
                 {format(value)}
               </text>
             </g>
@@ -305,7 +305,7 @@ export function ColumnChart({
                   y={height - 8}
                   textAnchor="middle"
                   fill="var(--dim)"
-                  fontSize="8.5"
+                  fontSize="11"
                   fontFamily="var(--font-mono)"
                 >
                   {point.label}
@@ -327,7 +327,7 @@ export function ColumnChart({
             borderRadius: 3,
             background: 'var(--surface)',
             fontFamily: 'var(--font-mono)',
-            fontSize: 10.5,
+            fontSize: 12,
             color: 'var(--text)',
             pointerEvents: 'none',
             whiteSpace: 'nowrap',

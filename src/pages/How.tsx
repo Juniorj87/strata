@@ -5,6 +5,8 @@ const NAV = [
   { id: 'overview', label: 'Overview' },
   { id: 'quick-start', label: 'Quick start' },
   { id: 'templates', label: 'Templates' },
+  { id: 'advanced-trading', label: 'Advanced Trading' },
+  { id: 'tokens-wallets', label: 'Tokens & wallets' },
   { id: 'costs', label: 'Costs & escrow' },
   { id: 'limits', label: 'Risk & limits' },
   { id: 'faq', label: 'FAQ' },
@@ -46,7 +48,7 @@ const FAQ = [
   },
   {
     q: 'What happens when the gas escrow runs out?',
-    a: 'Scheduled runs stop when the contract can no longer pay for them. The owner can top up or stop the bot and withdraw the remaining balance. Escrow is not a subscription and Strata does not bill you.',
+    a: 'When escrow can no longer cover another run, the Cron Registry removes the job and refunds the remaining escrow. You can also stop a bot before then and withdraw its remaining funds. The current Strata interface does not expose a top-up action. Escrow is not a subscription and Strata does not bill you.',
   },
   {
     q: 'Is a strategy executed continuously?',
@@ -153,13 +155,13 @@ export function How() {
                     <tr key={template.id}>
                       <td>
                         {template.name}
-                        <span className="dim" style={{ display: 'block', fontSize: 10.5, fontWeight: 400, marginTop: 2 }}>
+                        <span className="dim" style={{ display: 'block', fontSize: 12.5, fontWeight: 400, marginTop: 3 }}>
                           {guided ? 'Lite + Pro' : 'Pro only'}
                         </span>
                       </td>
                       <td>{needs}</td>
                       <td className="mono" style={{ whiteSpace: 'nowrap' }}>{template.intervalSec}s</td>
-                      <td style={{ fontSize: 12 }}>{template.behavior}</td>
+                      <td style={{ fontSize: 13.5, lineHeight: 1.6 }}>{template.behavior}</td>
                     </tr>
                   );
                 })}
@@ -171,6 +173,63 @@ export function How() {
             <strong>Execution is scheduled, not continuous</strong>
             Price conditions are evaluated each time the cron job runs. Between runs the market keeps moving, so a
             target can be crossed and missed without an execution.
+          </div>
+        </section>
+
+        <section id="advanced-trading">
+          <h2>Advanced Trading</h2>
+          <p>
+            Advanced Trading is the manual spot-trading workspace. It reads market pairs, candles and recent fills
+            from the Auras public indexer and reads pool reserves and token decimals from Asentum contracts.
+          </p>
+          <ul>
+            <li><strong style={{ color: 'var(--text)' }}>Timeframes:</strong> 1m, 5m, 15m, 30m, 1h, 4h, 1d and 1w. The 30m and 1w views are aggregated from smaller indexed candles.</li>
+            <li><strong style={{ color: 'var(--text)' }}>Candles:</strong> built from indexed AMM Swap events. Buckets with no fills remain gaps; Strata does not fabricate prices or volume.</li>
+            <li><strong style={{ color: 'var(--text)' }}>Market orders:</strong> immediate AMM swaps. The app refreshes the quote before asking the wallet to sign and applies a minimum-output/slippage guard.</li>
+            <li><strong style={{ color: 'var(--text)' }}>Limit orders:</strong> escrowed, scheduled AMM execution is available only on supported Auras v2 pools. These are not resting orders in a central order book and do not use a matching engine.</li>
+            <li><strong style={{ color: 'var(--text)' }}>AseDex:</strong> market swaps are supported where a live ASE pool is indexed. The Auras v2 limit-order module is not available on AseDex pools.</li>
+            <li><strong style={{ color: 'var(--text)' }}>Bot mode:</strong> creates a Spot strategy contract for the selected pool. The builder receives the exact on-chain pool ID and venue.</li>
+            <li><strong style={{ color: 'var(--text)' }}>Spot bots:</strong> DCA, Grid, TWAP, Momentum, Risk-managed exits, Limit Sell and Scale Order run through Asentum Cron. They do not use leverage or open short positions.</li>
+            <li><strong style={{ color: 'var(--text)' }}>Stop-loss / take-profit:</strong> are conditions inside the Risk-managed Spot strategy. They are checked only when the scheduled Cron run executes, not continuously.</li>
+          </ul>
+          <p>
+            The chart timeframe is independent of the bot schedule. Asentum Cron supports intervals from 60 seconds,
+            but not sub-minute high-frequency execution. A 5m chart does not automatically make a bot run every 5m;
+            choose the execution interval separately in the builder.
+          </p>
+          <p>
+            <strong style={{ color: 'var(--text)' }}>Perps are a separate product.</strong> They require long/short positions,
+            margin, leverage, funding, mark/index prices and liquidation rules from a real derivatives venue. No such
+            provider is connected here, so the Perps panel is disabled. Spot bots must never be described as Perps.
+          </p>
+          <div className="doc-hero-actions">
+            <Link className="btn btn-primary" to="/advanced">Open Advanced Trading</Link>
+            <Link className="btn btn-ghost" to="/deploy">Create a bot</Link>
+          </div>
+        </section>
+
+        <section id="tokens-wallets">
+          <h2>Tokens & wallet registry</h2>
+          <p>
+            Create Token deploys a user-owned ARC-20 contract to the Asentum testnet and initializes a fixed supply
+            to the deploying wallet. The token contract has no hidden mint, tax, blacklist or pause function.
+            Token deployment and initialization are separate wallet-confirmed transactions; if initialization fails,
+            the deployed contract can be recovered and initialized again.
+          </p>
+          <p>
+            Asentum documents ARC-20 as a draft application standard. Strata uses the published interface and
+            verifies the token name, symbol, decimals, supply and deployer balance by reading the contract after
+            initialization. Token creation does not automatically create a liquidity pool.
+          </p>
+          <p>
+            Strata has no server-side user database. Strategies and transaction history are stored locally in the
+            browser and keyed by wallet. The optional Wallet Registry is off by default and stores only public
+            addresses in this browser after explicit opt-in. Turning it off clears the saved list. No private keys,
+            seed phrases or signatures are collected.
+          </p>
+          <div className="doc-hero-actions">
+            <Link className="btn btn-primary" to="/create-token">Create a token</Link>
+            <Link className="btn btn-ghost" to="/portfolio">Open portfolio & wallet settings</Link>
           </div>
         </section>
 

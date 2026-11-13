@@ -28,9 +28,20 @@ function explorerApiBase(): string {
 }
 export const CHAIN_ID = 1423;
 
-/** Auras AMM (pool reads, quotes and swaps). */
-export const AURAS_AMM = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
-/** Backward-compatible alias: AURAS always means the AMM. */
+/**
+ * Auras AMM v2 (pool reads, quotes and swaps).
+ *
+ * Auras v2 shipped on 10 Nov 2026 as a fresh deployment, not an upgrade: the
+ * live pools and their liquidity moved to a new address. v1 still exists with
+ * whatever LPs have not migrated yet, so it stays readable for old strategies,
+ * but new pools, quotes and swaps must target v2.
+ */
+export const AURAS_AMM = '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
+/** Auras AMM v1 - legacy pools only. Do not point new strategies at it. */
+export const AURAS_AMM_V1 = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+/** Every Auras AMM deployment, for event and transfer accounting. */
+export const AURAS_AMM_ALL = [AURAS_AMM, AURAS_AMM_V1] as const;
+/** Backward-compatible alias: AURAS always means the live AMM. */
 export const AURAS = AURAS_AMM;
 /** AseDex Exchange contract address. */
 export const ASEDEX_AMM = '0xc3833b73eb30242289e533b3e97c4b72b97e24e9';
@@ -81,17 +92,19 @@ const _decimalsCache = new Map<string, number>([
   ['0xd580adfb35a68844903493f0dfa38549a1c74055', 18],
 ]);
 
+// Last-resort values for the Auras v2 pools (read from AURAS_AMM).
 const SEED_AURAS_POOLS: PoolInfo[] = [
-  { id: '1', symbol: 'AURA', name: 'Aura', token: '0xc24044dccea3ba8b362e1c85fa16ddc658022269', decimals: 18, reserveToken: '884101951294164496969', reserveNative: '255119482675813579290576', feeBps: '30', venue: 'auras' },
-  { id: '2', symbol: 'NOVA', name: 'Nova', token: '0xbea7c12cba13eddd8e8ad77ff8f62fcf27736d20', decimals: 18, reserveToken: '801175436753524179392567', reserveNative: '123590348068626602498043', feeBps: '30', venue: 'auras' },
-  { id: '3', symbol: 'PULSE', name: 'Pulse', token: '0x50cb8d861050ad0052959e0f942c5347842346f1', decimals: 18, reserveToken: '1108426962526519476578932', reserveNative: '107950731999619564746480', feeBps: '30', venue: 'auras' },
-  { id: '4', symbol: 'ZEPH', name: 'Zephyr', token: '0xde4480220ba5793bff42fd9162954fa3fdb1acd3', decimals: 18, reserveToken: '1084779871586502715194020', reserveNative: '102943350810753527631833', feeBps: '30', venue: 'auras' },
-  { id: '5', symbol: 'ORB', name: 'Orbit', token: '0xe91421ecfe12f18814dc8c0635267fb2dc86ac6f', decimals: 18, reserveToken: '1064319870443717406966819', reserveNative: '104606579529973857312955', feeBps: '30', venue: 'auras' },
+  { id: '1', symbol: 'AURA', name: 'Aura', token: '0xc24044dccea3ba8b362e1c85fa16ddc658022269', decimals: 18, reserveToken: '39132791957176154358993', reserveNative: '108216002497810570773', feeBps: '30', venue: 'auras' },
+  { id: '2', symbol: 'NOVA', name: 'Nova', token: '0xbea7c12cba13eddd8e8ad77ff8f62fcf27736d20', decimals: 18, reserveToken: '1210114050382031660323', reserveNative: '5775879529390020532673', feeBps: '30', venue: 'auras' },
+  { id: '3', symbol: 'PULSE', name: 'Pulse', token: '0x50cb8d861050ad0052959e0f942c5347842346f1', decimals: 18, reserveToken: '319074120867226569623', reserveNative: '2474343214931471390883', feeBps: '30', venue: 'auras' },
+  { id: '4', symbol: 'ZEPH', name: 'Zephyr', token: '0xde4480220ba5793bff42fd9162954fa3fdb1acd3', decimals: 18, reserveToken: '501707569303402267825', reserveNative: '4134724708698214796095', feeBps: '30', venue: 'auras' },
+  { id: '5', symbol: 'ORB', name: 'Orbit', token: '0xe91421ecfe12f18814dc8c0635267fb2dc86ac6f', decimals: 18, reserveToken: '316080511452246493758', reserveNative: '993339130899583248733', feeBps: '30', venue: 'auras' },
 ];
 
 let _poolsCache: PoolInfo[] | null = null;
 let _fetchingPoolsPromise: Promise<PoolInfo[]> | null = null;
-const POOLS_LS_KEY = 'strata_pools_v1';
+// v2 key: a list saved against the v1 AMM must not be painted after the move.
+const POOLS_LS_KEY = 'strata_pools_v2';
 
 type RawPool = {
   id: string;
@@ -151,7 +164,7 @@ async function scanAurasPools(): Promise<PoolInfo[]> {
     // Read the declared pool count so tokens in newer pools are not skipped;
     // fall back to the historical scan bound when the read fails.
     const declared = Number(String(await viewCall<unknown>(AURAS_AMM, 'poolCount', []).catch(() => '0')).replace(/\D/g, ''));
-    const maxPoolId = Number.isFinite(declared) && declared > 0 ? Math.min(declared, 60) : 32;
+    const maxPoolId = Number.isFinite(declared) && declared > 0 ? Math.min(declared, 60) : 12;
     const batchSize = 6;
     let consecutiveNulls = 0;
     const candidates: { pool: RawPool; token: string; tokenLower: string; tokenIs0: boolean }[] = [];
@@ -688,7 +701,7 @@ export async function getBalance(address: string): Promise<{ balance: string; no
  */
 const VIEW_CACHE = new Map<string, { at: number; value: unknown }>();
 const VIEW_CACHE_MS = 800;
-const VIEW_MAX_CONCURRENT = 3;
+const VIEW_MAX_CONCURRENT = 6;
 let viewActive = 0;
 const viewQueue: (() => void)[] = [];
 
@@ -768,10 +781,12 @@ export async function viewCall<T = string>(
       await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
       continue;
     }
+    // The gateway sometimes answers HTTP 200 with an HTML error page while it
+    // is busy. That is transient exactly like a 502, so retry it instead of
+    // failing the swap quote (and every balance read) on the first hiccup.
     lastMessage = res.status >= 500
       ? `the Asentum node is busy (${res.status})`
-      : `unreadable response (${res.status})`;
-    if (res.status < 500) break;
+      : 'the Asentum node returned a busy non-JSON page';
     await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
   }
   throw new Error(`${method}: ${lastMessage || 'no response from the node'}`);
@@ -1027,20 +1042,20 @@ export interface AurasPool {
   lastTs: string;
 }
 
-export async function getPool(poolId: string): Promise<AurasPool | null> {
-  const raw = await viewCall<unknown>(AURAS, 'getPool', [poolId]);
+export async function getPool(poolId: string, amm: string = AURAS_AMM): Promise<AurasPool | null> {
+  const raw = await viewCall<unknown>(amm, 'getPool', [poolId]);
   return raw ? asRecord<AurasPool>(raw, 'Auras getPool') : null;
 }
 
 /** Auras TWAP accumulators + reserves. */
-export async function consult(poolId: string): Promise<{
+export async function consult(poolId: string, amm: string = AURAS_AMM): Promise<{
   price0Cumulative: string;
   price1Cumulative: string;
   lastTs: string;
   reserve0: string;
   reserve1: string;
 }> {
-  return asRecord(await viewCall<unknown>(AURAS, 'consult', [poolId]), 'Auras consult') as {
+  return asRecord(await viewCall<unknown>(amm, 'consult', [poolId]), 'Auras consult') as {
     price0Cumulative: string;
     price1Cumulative: string;
     lastTs: string;
@@ -1049,8 +1064,13 @@ export async function consult(poolId: string): Promise<{
   };
 }
 
-export async function quote(poolId: string, tokenIn: string, amountIn: string): Promise<string> {
-  return String(await viewCall<unknown>(AURAS, 'quote', [poolId, tokenIn, amountIn]));
+export async function quote(
+  poolId: string,
+  tokenIn: string,
+  amountIn: string,
+  amm: string = AURAS_AMM,
+): Promise<string> {
+  return String(await viewCall<unknown>(amm, 'quote', [poolId, tokenIn, amountIn]));
 }
 
 /** Cron job record from the protocol registry. */

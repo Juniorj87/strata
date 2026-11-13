@@ -1,7 +1,7 @@
 // Strata template: dca - recurring buy DCA for Auras AMM and AseDex.
 // init(poolId, token, buySizeAseWei, totalBudgetAseWei, intervalSec, ammAddress)
 // msg.value must include totalBudgetAseWei + cron escrow.
-const AURAS_AMM = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+const AURAS_AMM = '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
 const ASEDEX_AMM = '0xc3833b73eb30242289e533b3e97c4b72b97e24e9';
 const CRON='0x0000000000000000000000000000000000000006';
 const NATIVE='0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
@@ -15,10 +15,13 @@ function stopCron(reason){const id=storage.get('jobId')||'';if(activeJob(id))E(C
   assert(!storage.has('owner'),'already initialised');const size=BigInt(buySizeAseWei),budget=BigInt(totalBudgetAseWei),interval=BigInt(intervalSec);
   assert(size>0n&&budget>=size,'invalid buy size or total budget');assert(interval>=60n&&interval<=86400n,'interval must be 60..86400 seconds');
   assert(msg.value>=budget+CRON_ESCROW,'init value must cover ASE DCA budget plus cron escrow');
+  // The full escrow the user paid must back the schedule, not a fixed dust
+  // amount, otherwise the cron job only survives one run.
+  const cronEscrow=msg.value-budget;
   const amm=ammAddress||AURAS_AMM;
   assertAsePool(poolId,token,amm);
   storage.set('owner',msg.sender);storage.set('poolId',String(poolId));storage.set('token',String(token));storage.set('ammAddress',String(amm));storage.set('buySizeAseWei',size.toString());storage.set('totalBudgetAseWei',budget.toString());storage.set('spentAseWei','0');storage.set('legs','0');storage.set('intervalSec',interval.toString());storage.set('stopped','false');
-  const ms=interval*1000n;const id=E(CRON,{value:CRON_ESCROW}).schedule(msg.contractAddress,'tick',[],(chain.blockTimestamp+ms).toString(),ms.toString(),'0','700000');storage.set('jobId',String(id));
+  const ms=interval*1000n;const id=E(CRON,{value:cronEscrow}).schedule(msg.contractAddress,'tick',[],(chain.blockTimestamp+ms).toString(),ms.toString(),'0','700000');storage.set('jobId',String(id));
   emit('StrataDeploy',{owner:msg.sender,template:'dca',poolId:String(poolId),intervalSec:interval.toString(),timestamp:chain.blockTimestamp.toString()});emit('DcaConfigured',{buySizeAseWei:size.toString(),totalBudgetAseWei:budget.toString(),jobId:String(id)});return String(id);
 },
   tick(){

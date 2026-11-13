@@ -26,7 +26,7 @@
     "test:trading": "node scripts/simulate-trading-lifecycle.mjs"
   },
   "dependencies": {
-    "@asentum/connect": "^0.1.9",
+    "@asentum/connect": "^0.2.0",
     "@asentum/sdk": "^0.2.0",
     "@noble/hashes": "^2.4.0",
     "react": "^19.3.1",

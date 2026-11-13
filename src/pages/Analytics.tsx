@@ -112,16 +112,16 @@ export function Analytics() {
         </p>
         <div className="mode-switch" role="tablist" style={{ marginTop: 22 }}>
           <Link to="/analytics" className="mode-option active">
-            <span>Protocol analytics</span>
+            <span>Overview</span>
             <small>Volume & executions</small>
           </Link>
           <Link to="/activity" className="mode-option">
-            <span>Activity ledger</span>
+            <span>Fills</span>
             <small>Every indexed fill</small>
           </Link>
           <Link to="/leaderboard" className="mode-option">
-            <span>Strategy leaderboard</span>
-            <small>Ranked strategies</small>
+            <span>Leaderboard</span>
+            <small>Wallets ranked</small>
           </Link>
         </div>
       </section>
@@ -329,7 +329,7 @@ export function Analytics() {
                 Sorted by {SORT_LABEL[sortKey]} · {sortDesc ? 'descending' : 'ascending'}
               </p>
             </div>
-            <span className="muted" style={{ fontSize: 11.5 }}>
+            <span className="muted" style={{ fontSize: 13 }}>
               Verified source · Asentum testnet
             </span>
           </div>
@@ -357,7 +357,7 @@ export function Analytics() {
                         <Link to={`/strategies/${strategy.address}`} style={{ color: 'var(--text)' }}>
                           <strong>{strategy.name}</strong>
                         </Link>
-                        <span className="mono muted" style={{ display: 'block', fontSize: 10.5, marginTop: 2 }}>
+                        <span className="mono muted" style={{ display: 'block', fontSize: 13, marginTop: 2 }}>
                           {botTypeFor(strategy.template)?.title ?? strategy.template} · {shortAddr(strategy.ase1, 8, 4)} ·{' '}
                           <span className={status.className}>{status.label}</span>
                         </span>

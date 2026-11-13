@@ -1,6 +1,6 @@
 import type { AsentumClient } from '@asentum/connect';
 import type { LivePool } from './registry';
-import { NATIVE, viewCall } from './rpc';
+import { AURAS_AMM, ASEDEX_AMM, NATIVE, viewCall } from './rpc';
 
 /**
  * Swap plumbing for the existing Asentum AMMs.
@@ -20,6 +20,8 @@ export interface SwapToken {
   decimals: number;
   isNative: boolean;
   venue: 'auras' | 'asedex';
+  /** Exact AMM contract returned by the live market indexer, when available. */
+  ammAddress?: string;
   poolId: string;
   reserveToken: string;
   reserveNative: string;
@@ -43,8 +45,8 @@ export const ASE_TOKEN: SwapToken = {
 };
 
 export const AMM_BY_VENUE = {
-  auras: '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd',
-  asedex: '0xc3833b73eb30242289e533b3e97c4b72b97e24e9',
+  auras: AURAS_AMM,
+  asedex: ASEDEX_AMM,
 } as const;
 
 function toNumber(value: string, decimals: number): number {
@@ -103,8 +105,10 @@ export function swapTokens(pools: LivePool[], asedexPools: LivePool[]): { ase: S
   return { ase: [ASE_TOKEN], tokens };
 }
 
-export function ammFor(venue: SwapToken['venue']): string {
-  return AMM_BY_VENUE[venue];
+export function ammFor(venue: SwapToken['venue'], ammAddress?: string): string {
+  // Prefer the exact contract attached to the selected live pool. This avoids
+  // quoting against a stale venue-wide address after an AMM redeployment.
+  return ammAddress || AMM_BY_VENUE[venue];
 }
 
 export interface SwapQuote {
@@ -131,7 +135,7 @@ export interface QuoteInput {
 export async function quoteSwap({ tokenIn, tokenOut, amountIn, pool, slippageBps }: QuoteInput): Promise<SwapQuote> {
   if (amountIn <= 0n) throw new Error('Enter an amount to swap.');
   if (pool.reserveToken === '0' || pool.reserveNative === '0') throw new Error('This pool reports no liquidity.');
-  const amm = ammFor(pool.venue);
+  const amm = ammFor(pool.venue, pool.ammAddress);
   const raw = await viewCall<unknown>(amm, 'quote', [pool.poolId, tokenIn.address, amountIn.toString()]);
   let amountOut: bigint;
   try {
@@ -197,7 +201,7 @@ export async function executeSwap({
   minOut,
   onStage,
 }: ExecuteSwapParams): Promise<ExecuteSwapResult> {
-  const amm = ammFor(pool.venue);
+  const amm = ammFor(pool.venue, pool.ammAddress);
   let approvalHash: string | undefined;
 
   if (!tokenIn.isNative) {
@@ -221,12 +225,14 @@ export async function executeSwap({
   }
 
   onStage?.('Confirm the swap in your wallet');
-  const value = tokenIn.isNative ? amountIn : undefined;
+  // @asentum/connect expects native value as a decimal wei string, not bigint.
+  const value = tokenIn.isNative ? amountIn.toString() : undefined;
   const hash = await client.call(
     amm,
     'swapExactIn',
     [pool.poolId, tokenIn.address, amountIn.toString(), minOut.toString()],
     value,
+    { gasLimit: 400_000 },
   );
   return { hash, approvalHash };
 }

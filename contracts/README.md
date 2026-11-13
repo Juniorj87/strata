@@ -17,7 +17,8 @@ Grid uses one-time price levels around the deployment reference price. Each leve
 
 ## Network addresses
 
-- **Auras AMM:** `ase1v0myp2de3dhj3crvkhxqlnjaw2mvp64a9efkpl` / `0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd`
+- **Auras AMM v2 (live):** `ase1eswfq2w0aysqf098dsqneme0m2n4x5dz4j86xe` / `0xcc1c9029cfe92004bca76c013cef2fdaa75351a2`
+- **Auras AMM v1 (legacy pools only):** `ase1v0myp2de3dhj3crvkhxqlnjaw2mvp64a9efkpl` / `0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd`
 - **AseDex Exchange:** `ase1cwpnkultxqjz9z09xwe7jlztw2uhuf8fklhzsm` / `0xc3833b73eb30242289e533b3e97c4b72b97e24e9`
 - **Cron Registry:** `ase1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqxgkr943` / `0x0000000000000000000000000000000000000006`
 - **Strata Hub:** `ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut`

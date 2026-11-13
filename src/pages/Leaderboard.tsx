@@ -1,46 +1,69 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAsync } from '../lib/hooks';
-import { loadProtocol, strategyRows, walletRows, type StrategyRow } from '../lib/protocol';
+import { loadProtocol, strategyRows, walletRows, type StrategyRow, type WalletRow } from '../lib/protocol';
 import { fmtAgeFrom, fmtNum, fmtWei, formatUnits, shortAddr } from '../lib/format';
 import { botTypeFor } from '../lib/templates';
 
-type SortKey = 'fills' | 'gross' | 'inventory' | 'recent' | 'volume';
+type SortKey = 'running' | 'fills' | 'gross' | 'recent';
 
-const COLUMNS: { key: SortKey; label: string; optional?: boolean }[] = [
+const COLUMNS: { key: SortKey; label: string }[] = [
+  { key: 'running', label: 'Bots running' },
   { key: 'fills', label: 'Executions' },
-  { key: 'volume', label: 'Token sold', optional: true },
   { key: 'gross', label: 'Gross ASE' },
-  { key: 'inventory', label: 'Open inventory', optional: true },
-  { key: 'recent', label: 'Last activity', optional: true },
+  { key: 'recent', label: 'Last activity' },
 ];
 
 function asBig(value: string): bigint {
   try { return BigInt(value || '0'); } catch { return 0n; }
 }
 
-function rowValue(row: StrategyRow, key: SortKey): number {
+function walletValue(row: WalletRow, key: SortKey): number {
   switch (key) {
     case 'gross': return Number(asBig(row.grossAseWei));
-    case 'inventory': return Number(asBig(row.inventoryAseWei));
     case 'recent': return row.lastFillAt ?? 0;
-    case 'volume': return Number(asBig(row.soldTokenRaw));
-    default: return row.fills;
+    case 'fills': return row.fills;
+    default: return row.running;
   }
+}
+
+function strategyValue(row: StrategyRow, key: 'fills' | 'gross' | 'recent'): number {
+  if (key === 'gross') return Number(asBig(row.grossAseWei));
+  if (key === 'recent') return row.lastFillAt ?? 0;
+  return row.fills;
 }
 
 export function Leaderboard() {
   const { data, loading, error, refresh } = useAsync(() => loadProtocol(), 30_000);
-  const [sortKey, setSortKey] = useState<SortKey>('gross');
+  const [sortKey, setSortKey] = useState<SortKey>('running');
   const [sortDesc, setSortDesc] = useState(true);
+  const [strategySort, setStrategySort] = useState<'fills' | 'gross' | 'recent'>('fills');
 
-  const rows = useMemo(() => (data ? strategyRows(data).filter((row) => row.strategy.verified) : []), [data]);
   const wallets = useMemo(() => (data ? walletRows(data) : []), [data]);
+  const strategies = useMemo(
+    () => (data ? strategyRows(data).filter((row) => row.strategy.verified) : []),
+    [data],
+  );
   const stats = data?.stats ?? null;
 
-  const sorted = useMemo(
-    () => [...rows].sort((a, b) => (sortDesc ? rowValue(b, sortKey) - rowValue(a, sortKey) : rowValue(a, sortKey) - rowValue(b, sortKey))),
-    [rows, sortKey, sortDesc],
+  const sortedWallets = useMemo(
+    () => [...wallets].sort((a, b) => {
+      const diff = walletValue(b, sortKey) - walletValue(a, sortKey);
+      if (diff !== 0) return sortDesc ? diff : -diff;
+      // A stable tiebreak keeps the busiest wallets above idle ones.
+      return b.fills - a.fills;
+    }),
+    [wallets, sortKey, sortDesc],
+  );
+
+  const sortedStrategies = useMemo(
+    () => [...strategies].sort((a, b) => strategyValue(b, strategySort) - strategyValue(a, strategySort)),
+    [strategies, strategySort],
+  );
+
+  const runningBots = useMemo(
+    () => strategies.filter((row) => row.strategy.cron !== null && row.strategy.stopped !== true).length,
+    [strategies],
   );
 
   const toggleSort = (key: SortKey) => {
@@ -57,34 +80,37 @@ export function Leaderboard() {
       : 'Connection error'
     : loading && !data
       ? 'Reading verified contracts…'
-      : rows.length === 0
-        ? 'No ranked strategies yet'
-        : `${fmtNum(rows.length)} verified strategies · ranked by ${sortKey === 'recent' ? 'last activity' : sortKey}`;
+      : wallets.length === 0
+        ? 'No ranked wallets yet'
+        : `${fmtNum(wallets.length)} wallets · ${fmtNum(runningBots)} bots running`;
 
   return (
     <>
       <section className="wrap detail-head">
-        <span className="label">Leaderboard · verified contracts only</span>
+        <span className="label">Leaderboard · wallets that run bots here</span>
         <h1 className="detail-title">
-          Ranked by what
+          The wallets behind
           <br />
-          the chain confirms.
+          the running bots.
         </h1>
         <p className="section-note" style={{ maxWidth: 680, marginTop: 18 }}>
-          Public ranking of all verified strategies. Strategies are ordered by quote volume and execution count taken from their own swap receipts. Gross ASE is proceeds, not profit; open inventory is a live AMM quote. No ROI is shown without a verified cost basis.
+          Wallets are ranked, not individual bots: every figure is the sum of the verified Strata contracts that
+          wallet owns, read from their own swap receipts. Gross ASE is proceeds, not profit; open inventory is a
+          live AMM quote. A bot with an ended schedule still counts in its wallet&apos;s history but not in the
+          running count.
         </p>
         <div className="mode-switch" role="tablist" style={{ marginTop: 22 }}>
           <Link to="/analytics" className="mode-option">
-            <span>Protocol analytics</span>
-            <small>Volume & executions</small>
+            <span>Overview</span>
+            <small>Volume &amp; executions</small>
           </Link>
           <Link to="/activity" className="mode-option">
-            <span>Activity ledger</span>
+            <span>Fills</span>
             <small>Every indexed fill</small>
           </Link>
           <Link to="/leaderboard" className="mode-option active">
-            <span>Strategy leaderboard</span>
-            <small>Ranked strategies</small>
+            <span>Leaderboard</span>
+            <small>Wallets ranked</small>
           </Link>
         </div>
       </section>
@@ -97,7 +123,7 @@ export function Leaderboard() {
             Refresh
           </button>
           <Link className="btn btn-ghost btn-sm" to="/activity">
-            Activity ledger →
+            Fills ledger →
           </Link>
         </div>
 
@@ -112,12 +138,12 @@ export function Leaderboard() {
 
         <div className="leaderboard-stats">
           <div className="metric">
-            <span className="label">Ranked strategies</span>
-            <strong>{stats ? fmtNum(stats.verifiedStrategies) : '—'}</strong>
+            <span className="label">Ranked wallets</span>
+            <strong>{data ? fmtNum(wallets.length) : '—'}</strong>
           </div>
           <div className="metric">
-            <span className="label">Active</span>
-            <strong>{stats ? fmtNum(stats.activeStrategies) : '—'}</strong>
+            <span className="label">Bots running</span>
+            <strong>{data ? fmtNum(runningBots) : '—'}</strong>
           </div>
           <div className="metric">
             <span className="label">Executed fills</span>
@@ -140,12 +166,14 @@ export function Leaderboard() {
         <div className="panel">
           <div className="panel-head">
             <div>
-              <span className="label">Strategy ranking</span>
+              <span className="label">Wallet ranking</span>
               <p className="muted" style={{ marginTop: 3 }}>
-                {sorted.length === 0 ? 'Awaiting the first verified execution' : 'Click a column to re-rank'}
+                {sortedWallets.length === 0
+                  ? 'Awaiting the first verified execution'
+                  : 'Click a column to re-rank · every bot belongs to the wallet above it'}
               </p>
             </div>
-            <span className="muted" style={{ fontSize: 11.5 }}>
+            <span className="muted" style={{ fontSize: 13 }}>
               Asentum testnet · live
             </span>
           </div>
@@ -158,13 +186,13 @@ export function Leaderboard() {
             </div>
           )}
 
-          {!loading && sorted.length === 0 && (
+          {!loading && sortedWallets.length === 0 && (
             <div className="leaderboard-empty">
-              <h3>{error ? 'The leaderboard could not be read' : 'No verified strategies ranked yet'}</h3>
+              <h3>{error ? 'The leaderboard could not be read' : 'No verified wallets ranked yet'}</h3>
               <p className="muted">
                 {error
                   ? 'The registry or explorer did not answer. Retry once the connection recovers.'
-                  : 'A strategy appears once its contract is verified and has produced at least one indexed swap.'}
+                  : 'A wallet appears once one of its verified bots has produced at least one indexed swap.'}
               </p>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
                 <Link className="btn btn-primary btn-sm" to="/deploy">
@@ -177,17 +205,16 @@ export function Leaderboard() {
             </div>
           )}
 
-          {sorted.length > 0 && (
+          {sortedWallets.length > 0 && (
             <div className="table-scroll">
               <table className="leaderboard-table">
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Strategy</th>
-                    <th className="col-optional">Creator</th>
-                    <th>Pair</th>
+                    <th>Wallet</th>
+                    <th>Bots</th>
                     {COLUMNS.map((column) => (
-                      <th key={column.key} className={column.optional ? 'col-optional' : undefined}>
+                      <th key={column.key}>
                         <button
                           type="button"
                           className={sortKey === column.key ? 'sort-btn active' : 'sort-btn'}
@@ -199,11 +226,88 @@ export function Leaderboard() {
                         </button>
                       </th>
                     ))}
+                    <th>Pairs</th>
                     <th>Details</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sorted.map((row, index) => {
+                  {sortedWallets.map((wallet, index) => (
+                    <tr key={wallet.wallet}>
+                      <td className="mono rank-cell">{index + 1}</td>
+                      <td>
+                        <span className="mono">{shortAddr(wallet.wallet, 8, 6)}</span>
+                        <span className="mono muted" style={{ display: 'block', fontSize: 13, marginTop: 2 }}>
+                          {wallet.running > 0 ? `${wallet.running} running` : 'no schedule running'}
+                        </span>
+                      </td>
+                      <td className="mono">{wallet.strategies}</td>
+                      <td className="mono">{fmtNum(wallet.running)}</td>
+                      <td className="mono">{fmtNum(wallet.fills)}</td>
+                      <td className="mono">{fmtWei(wallet.grossAseWei, 3)}</td>
+                      <td className="mono">{wallet.lastFillAt ? fmtAgeFrom(wallet.lastFillAt) : '—'}</td>
+                      <td>{wallet.tokens.slice(0, 3).join(' · ') || '—'}</td>
+                      <td>
+                        <a
+                          className="link-arrow"
+                          href={`https://explorer.asentum.com/address/${wallet.wallet}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Explorer →
+                        </a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="panel" style={{ marginTop: 18 }}>
+          <div className="panel-head">
+            <div>
+              <span className="label">Bots behind these wallets</span>
+              <p className="muted" style={{ marginTop: 3 }}>
+                Secondary view — the same contracts aggregated above, listed individually
+              </p>
+            </div>
+            <div className="swap-slippage-opts">
+              {(['fills', 'gross', 'recent'] as const).map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={strategySort === key ? 'chip-btn active' : 'chip-btn'}
+                  onClick={() => setStrategySort(key)}
+                >
+                  {key === 'fills' ? 'Fills' : key === 'gross' ? 'Gross ASE' : 'Recent'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {sortedStrategies.length === 0 ? (
+            <div className="leaderboard-empty">
+              <h3>No verified bots indexed</h3>
+              <p className="muted">Bots appear once their contract is verified and has produced an indexed swap.</p>
+            </div>
+          ) : (
+            <div className="table-scroll">
+              <table className="leaderboard-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Bot</th>
+                    <th>Owner</th>
+                    <th>Pair</th>
+                    <th>Executions</th>
+                    <th>Token sold</th>
+                    <th>Gross ASE</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedStrategies.map((row, index) => {
                     const strategy = row.strategy;
                     return (
                       <tr key={strategy.address}>
@@ -212,21 +316,19 @@ export function Leaderboard() {
                           <Link to={`/strategies/${strategy.address}`} style={{ color: 'var(--text)' }}>
                             <strong>{strategy.name}</strong>
                           </Link>
-                          <span className="mono muted" style={{ display: 'block', fontSize: 10.5, marginTop: 2 }}>
+                          <span className="mono muted" style={{ display: 'block', fontSize: 13, marginTop: 2 }}>
                             {botTypeFor(strategy.template)?.title ?? strategy.template} · {shortAddr(strategy.address, 8, 4)}
                           </span>
                         </td>
-                        <td className="mono col-optional">{strategy.owner ? shortAddr(strategy.owner) : '—'}</td>
+                        <td className="mono">{strategy.owner ? shortAddr(strategy.owner) : '—'}</td>
                         <td>{strategy.symbol ? `${strategy.symbol}/ASE` : '—'}</td>
                         <td className="mono">{fmtNum(row.fills)}</td>
-                        <td className="mono col-optional">
+                        <td className="mono">
                           {strategy.tokenDecimals === null
                             ? `${row.soldTokenRaw} raw`
                             : `${formatUnits(row.soldTokenRaw, strategy.tokenDecimals, 4)} ${strategy.symbol ?? ''}`.trim()}
                         </td>
                         <td className="mono">{fmtWei(row.grossAseWei, 3)}</td>
-                        <td className="mono col-optional">{fmtWei(row.inventoryAseWei, 3)}</td>
-                        <td className="mono col-optional">{row.lastFillAt ? fmtAgeFrom(row.lastFillAt) : '—'}</td>
                         <td>
                           <Link className="link-arrow" to={`/strategies/${strategy.address}`}>
                             Open →
@@ -241,56 +343,21 @@ export function Leaderboard() {
           )}
         </div>
 
-        <div className="leaderboard-grid">
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <span className="label">Wallet ranking</span>
-                <p className="muted" style={{ marginTop: 3 }}>
-                  Aggregated from the same strategy snapshot
-                </p>
-              </div>
-              <span className="pill pill-live">Secondary</span>
-            </div>
-            {wallets.length === 0 ? (
-              <div className="leaderboard-empty">
-                <h3>No creator wallets indexed</h3>
-                <p className="muted">Creator addresses appear once a verified strategy is registered on the hub.</p>
-              </div>
-            ) : (
-              <div className="wallet-rank">
-                {wallets.slice(0, 8).map((wallet, index) => (
-                  <div className="wallet-rank-row" key={wallet.wallet}>
-                    <span className="mono rank-cell">{index + 1}</span>
-                    <div>
-                      <strong className="mono">{shortAddr(wallet.wallet, 8, 6)}</strong>
-                      <span className="muted" style={{ display: 'block', fontSize: 10.5 }}>
-                        {wallet.strategies} strategies · {wallet.fills} fills
-                      </span>
-                    </div>
-                    <span className="mono">{fmtWei(wallet.grossAseWei, 3)}</span>
-                    <span className="mono muted" style={{ fontSize: 10.5 }}>
-                      {wallet.tokens.slice(0, 3).join(' · ') || '—'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="leaderboard-note">
-            <strong>How this ranking is computed</strong>
-            <span>
-              Position is determined only by confirmed data: fills come from swap receipts attributed to a verified
-              contract, and executed counts also respect the contract&apos;s own counters. Volume is the token amount
-              sold, quoted in the token&apos;s own decimals and never merged across assets. Gross ASE received is
-              quote volume from token → ASE fills — proceeds, not profit. Open inventory is a live AMM quote of unsold
-              tokens. No ROI or PnL is displayed here because a reliable profit figure needs a per-strategy cost
-              basis, which is only computed on the strategy page where it can be explained.
-            </span>
-          </div>
+        <div className="leaderboard-note">
+          <strong>How this ranking is computed</strong>
+          <span>
+            Position is determined only by confirmed data: a wallet&apos;s bots are the verified contracts whose
+            owner field is that address, fills come from swap receipts attributed to those contracts, and the
+            running count only includes bots whose cron job still exists and whose stop flag is false. Volume is
+            the token amount sold, quoted in the token&apos;s own decimals and never merged across assets. Gross ASE
+            received is quote volume from token → ASE fills — proceeds, not profit. Open inventory is a live AMM
+            quote of unsold tokens. No ROI or PnL is displayed here because a reliable profit figure needs a
+            per-strategy cost basis, which is only computed on the strategy page where it can be explained.
+          </span>
         </div>
       </section>
     </>
   );
 }
+
+export default Leaderboard;

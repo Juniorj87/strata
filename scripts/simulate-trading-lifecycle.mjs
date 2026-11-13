@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const AMM = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+const AMM = '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
 const CRON = '0x0000000000000000000000000000000000000006';
 const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 const TOKEN = '0x1111111111111111111111111111111111111111';
@@ -346,8 +346,8 @@ for (const rule of ['take-profit', 'max-drawdown']) {
 const registry = readFileSync(resolve(ROOT, 'src/lib/registry.ts'), 'utf8');
 const pnl = readFileSync(resolve(ROOT, 'src/components/StrategyPnlPanel.tsx'), 'utf8');
 const rpc = readFileSync(resolve(ROOT, 'src/lib/rpc.ts'), 'utf8');
-assert.match(registry, /historyComplete: Boolean\(indexedDeployment && logsResult\.complete && transferHistoryComplete\)/);
-assert.match(registry, /getLogs\(token, scanFrom, heads\.finalized \|\| undefined\)/);
+assert.match(registry, /historyComplete: Boolean\([\s\S]*accounting\.receiptsResolved[\s\S]*!accounting\.capped[\s\S]*fills\.length >= contractTrades[\s\S]*transferHistoryComplete[\s\S]*\)/);
+assert.match(registry, /getAddressTransfers\(hex, 100\)/);
 assert.match(pnl, /strategy\.historyComplete && strategy\.fillEvents\.length === strategy\.trades/);
 assert.match(pnl, /strategy\.tokenTransfers/);
 assert.match(pnl, /unmatchedOutbound/);

@@ -2,7 +2,7 @@
 // init(poolId, token, stepBps, levels, sellSizeWei, sellBudgetWei, buySizeAseWei, buyBudgetAseWei, decimals, ammAddress)
 // The owner funds the contract with ARC-20 inventory after init and sends
 // buyBudgetAseWei + cronEscrow as init msg.value. Each level is executed once.
-const AURAS_AMM = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+const AURAS_AMM = '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
 const ASEDEX_AMM = '0xc3833b73eb30242289e533b3e97c4b72b97e24e9';
 const CRON = '0x0000000000000000000000000000000000000006';
 const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
@@ -46,6 +46,9 @@ function readAsePrice(poolId, token, decimals, ammAddress) {
     assert(tokenDecimals>=0n && tokenDecimals<=18n, 'invalid token decimals');
     assert(sell>0n && sellBudget>=sell*count && buy>0n && budget>=buy*count, 'each side budget must cover every configured grid level');
     assert(msg.value>=budget+CRON_ESCROW, 'init value must cover ASE buy budget plus cron escrow');
+    // Schedule with the escrow actually funded; a fixed 800000 wei only paid
+    // for a single tick, so every grid died after its first run.
+    const cronEscrow = msg.value - budget;
     const amm = ammAddress || AURAS_AMM;
     const center=readAsePrice(poolId,token,Number(tokenDecimals), amm);
     storage.set('owner',msg.sender); storage.set('poolId',String(poolId)); storage.set('token',String(token)); storage.set('ammAddress',String(amm));
@@ -55,10 +58,13 @@ function readAsePrice(poolId, token, decimals, ammAddress) {
     storage.set('buyLevel','1'); storage.set('sellLevel','1'); storage.set('center',center.toString());
     storage.set('ticks','0'); storage.set('stopped','false');
     const interval=60000n;
-    const id=E(CRON,{value:CRON_ESCROW}).schedule(msg.contractAddress,'tick',[],(chain.blockTimestamp+interval).toString(),interval.toString(),'0','800000');
+    // Give the owner time to deposit inventory after init: a tick that lands
+    // before the token transfer would otherwise stop the grid immediately.
+    const firstRunMs=interval>300000n?interval:300000n;
+    const id=E(CRON,{value:cronEscrow}).schedule(msg.contractAddress,'tick',[],(chain.blockTimestamp+firstRunMs).toString(),interval.toString(),'0','800000');
     storage.set('jobId',String(id));
     emit('StrataDeploy',{owner:msg.sender,template:'grid',poolId:String(poolId),intervalSec:'60',timestamp:chain.blockTimestamp.toString()});
-    emit('GridConfigured',{center:center.toString(),stepBps:step.toString(),levels:count.toString(),buyBudgetAseWei:budget.toString(),cronEscrowWei:CRON_ESCROW.toString()});
+    emit('GridConfigured',{center:center.toString(),stepBps:step.toString(),levels:count.toString(),buyBudgetAseWei:budget.toString(),cronEscrowWei:cronEscrow.toString()});
     return String(id);
   },
   tick() {

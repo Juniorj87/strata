@@ -171,21 +171,22 @@ export function Swap() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const quoteRequest = useRef(0);
 
-  // Default the receive side to the deepest live pool. Native ASE is a valid
-  // receive side for any token pair, and waiting for *both* venues used to
-  // leave the form empty for as long as AseDex was slow.
+  // The AMM only routes token <-> ASE. When a token is the pay side, ASE is
+  // the only valid receive side (and the other way round), so the form can
+  // never sit on a token -> token pair that no pool can price.
   useEffect(() => {
     if (!pools.data && !asedexPools.data) return;
-    if (tokenOut) {
-      const known = !tokenOut.isNative
-        && universe.tokens.some((token) => token.address === tokenOut.address && token.venue === tokenOut.venue);
-      const validNativeSide = tokenOut.isNative && !tokenIn.isNative;
-      if (known || validNativeSide) return;
+    if (!tokenIn.isNative) {
+      if (!tokenOut || !tokenOut.isNative) setTokenOut(ASE_TOKEN);
+      return;
     }
-    const fallback = universe.tokens.find(
-      (token) => !(token.address.toLowerCase() === tokenIn.address.toLowerCase() && token.venue === tokenIn.venue),
-    );
-    if (fallback) setTokenOut(fallback);
+    if (tokenOut && !tokenOut.isNative) {
+      const known = universe.tokens.some(
+        (token) => token.address === tokenOut.address && token.venue === tokenOut.venue,
+      );
+      if (known) return;
+    }
+    setTokenOut(universe.tokens[0] ?? null);
   }, [pools.data, asedexPools.data, universe.tokens, tokenOut, tokenIn]);
 
   useEffect(() => {
@@ -310,15 +311,18 @@ export function Swap() {
 
   const pickToken = (token: SwapToken) => {
     if (picker === 'in') {
-      if (tokenOut && token.address.toLowerCase() === tokenOut.address.toLowerCase() && token.venue === tokenOut.venue) {
-        setTokenOut(tokenIn.isNative ? null : tokenIn);
+      if (token.isNative) {
+        setTokenIn(ASE_TOKEN);
+        if (!tokenOut || tokenOut.isNative) setTokenOut(universe.tokens[0] ?? null);
+      } else {
+        setTokenIn(token);
+        setTokenOut(ASE_TOKEN);
       }
-      setTokenIn(token);
+    } else if (token.isNative) {
+      if (!tokenIn.isNative) setTokenIn(ASE_TOKEN);
     } else {
-      if (token.address.toLowerCase() === tokenIn.address.toLowerCase() && token.venue === tokenIn.venue) {
-        setTokenIn(tokenOut ?? ASE_TOKEN);
-      }
       setTokenOut(token);
+      if (!tokenIn.isNative) setTokenIn(ASE_TOKEN);
     }
     setPicker(null);
     setAmount('');
@@ -529,11 +533,17 @@ export function Swap() {
                         ? formatUnits(quote.amountOut, tokenOut.decimals, 8)
                         : '0.0'}
                   </output>
-                  <button type="button" className="swap-token-btn" onClick={() => setPicker('out')}>
+                  <button
+                    type="button"
+                    className="swap-token-btn"
+                    onClick={() => { if (tokenIn.isNative) setPicker('out'); }}
+                    disabled={!tokenIn.isNative}
+                    title={tokenIn.isNative ? 'Choose the token to receive' : 'Paying with a token always pays out in ASE'}
+                  >
                     {tokenOut
                       ? <><TokenMark symbol={tokenOut.symbol} isNative={tokenOut.isNative} /><strong>{tokenOut.symbol}</strong></>
-                      : <strong>Select token</strong>}
-                    <span aria-hidden="true">▾</span>
+                      : <strong>ASE</strong>}
+                    {tokenIn.isNative && <span aria-hidden="true">▾</span>}
                   </button>
                 </div>
               </div>
@@ -577,7 +587,7 @@ export function Swap() {
                       className={slippageBps === bps ? 'chip-btn active' : 'chip-btn'}
                       onClick={() => setSlippage(bps)}
                     >
-                      {(bps / 100).toFixed(bps === 10 ? 1 : 0)}%
+                      {(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%
                     </button>
                   ))}
                   <label className="swap-slippage-custom">
@@ -684,7 +694,7 @@ export function Swap() {
                             <td className="mono dim">{fmtTimestamp(row.timestamp)}</td>
                             <td>
                               <strong>{formatUnits(row.amountIn, row.tokenIn.decimals, 6)} {row.tokenIn.symbol}</strong>
-                              <span className="mono muted" style={{ display: 'block', fontSize: 10.5 }}>
+                              <span className="mono muted" style={{ display: 'block', fontSize: 13 }}>
                                 {row.venue === 'asedex' ? 'AseDex' : 'Auras'} · min {formatUnits(row.minOut, row.tokenOut.decimals, 6)}
                               </span>
                             </td>
@@ -772,7 +782,7 @@ export function Swap() {
               <span className="label">Before you sign</span>
               <ul className="swap-checklist">
                 <li>The quote is read from the pool contract, not from a price feed.</li>
-                <li>A token sale asks for an ERC-20 approval first, then the swap.</li>
+                <li>A token sale asks for an ARC-20 approval first, then the swap.</li>
                 <li>Your minimum output is enforced on chain; the swap reverts if the pool moves past it.</li>
                 <li>Strata never holds your keys and never sends a transaction without your wallet confirmation.</li>
               </ul>
@@ -785,7 +795,7 @@ export function Swap() {
       <TokenPicker
         open={picker !== null}
         title={picker === 'out' ? 'Receive token' : 'Pay with'}
-        tokens={allTokens}
+        tokens={picker === 'out' ? universe.tokens : allTokens}
         holdings={holdings}
         exclude={picker === 'out' ? tokenIn.address : tokenOut?.address}
         onSelect={pickToken}

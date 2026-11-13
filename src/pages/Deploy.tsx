@@ -13,6 +13,7 @@ import {
   getAccountMeta,
   getContractSource,
   hashSource,
+  rpcCall,
   STRATA_HUB,
   toAse1,
 } from '../lib/rpc';
@@ -53,6 +54,47 @@ const CONTRACT_SOURCES: Record<string, string> = {
   scale: scaleSource,
   'limit-exit': limitExitSource,
 };
+
+/** How long the wallet may sit on a prompt before the launch gives up. */
+const WALLET_PROMPT_TIMEOUT_MS = 90_000;
+
+/**
+ * A wallet that never answers leaves the modal spinning forever. Race the
+ * prompt against a deadline so the user gets a message they can act on.
+ */
+function withWalletTimeout<T>(action: Promise<T>, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(
+        `${label}: the wallet did not answer within 90 seconds. Open the Asentum wallet (extension or Telegram), ` +
+        'approve or reject the pending request, then try again. If the wallet confirms it later, check Portfolio before retrying.',
+      ));
+    }, WALLET_PROMPT_TIMEOUT_MS);
+    action.then(
+      (value) => { window.clearTimeout(timer); resolve(value); },
+      (error) => { window.clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+/**
+ * A wallet can return a transaction hash it never broadcast, and the old flow
+ * then waited two minutes for a receipt that could never arrive. Ask the node
+ * whether the hash is known before waiting on it.
+ */
+async function assertBroadcast(txHash: string, label: string): Promise<void> {
+  if (!txHash) throw new Error(`${label}: the wallet did not return a transaction hash.`);
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    const tx = await rpcCall<unknown>('eth_getTransactionByHash', [txHash]).catch(() => undefined);
+    if (tx) return;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error(
+    `${label}: Asentum still has no record of transaction ${txHash.slice(0, 12)}…, so it was never broadcast or was dropped ` +
+    'before inclusion. Open the Asentum wallet, dismiss the stale request, and retry.',
+  );
+}
 
 function toUnits(value: string, decimals: number): bigint {
   const clean = value.trim();
@@ -112,6 +154,8 @@ export function Deploy() {
   const [buySizeAse, setBuySizeAse] = useState(params.get('buySizeAse') ?? '10');
   const [buyBudgetAse, setBuyBudgetAse] = useState(params.get('buyBudgetAse') ?? '100');
   const [interval, setInterval] = useState(Number(params.get('interval') ?? initialTemplate.intervalSec));
+  const chartTfFromUrl = params.get('chartTf') ?? '';
+  const chartTfLabel = ({ '1m': '1 minute', '5m': '5 minutes', '15m': '15 minutes', '30m': '30 minutes', '1h': '1 hour', '4h': '4 hours', '1d': '1 day', '1w': '1 week' } as Record<string, string>)[chartTfFromUrl] ?? ''; 
   const [escrow, setEscrow] = useState('0.05');
   const [slices, setSlices] = useState(params.get('slices') ?? '5');
   const [levels, setLevels] = useState(params.get('levels') ?? '5');
@@ -129,6 +173,9 @@ export function Deploy() {
   const [resultWarning, setResultWarning] = useState('');
   const [error, setError] = useState('');
   const [registrationOk, setRegistrationOk] = useState(false);
+  // Publishing to the public leaderboard is an extra wallet approval with no
+  // effect on the bot itself, so the simple flow leaves it off by default.
+  const [publishToHub, setPublishToHub] = useState(params.get('hub') === '1');
   const fromMarketplace = params.get('fromMarketplace') === '1';
   const marketplaceBudgetHint = params.get('budgetHint') === 'suggested';
   const pools = useAsync(() => loadPools(), 20000);
@@ -484,8 +531,8 @@ export function Deploy() {
       const source = rawSource.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
       // STEP 1: Deploy contract
-      setStage('1/5 · Deploying contract (Please sign in wallet)');
-      const deployed = await client.deploy(source);
+      setStage('Wallet approval 1 — create the bot contract');
+      const deployed = await withWalletTimeout(client.deploy(source), 'Create the bot contract');
       setTxHashes((prev) => ({ ...prev, deploy: deployed.txHash }));
       setStepStatus('confirming');
       saveUserTx(wallet.address, {
@@ -496,6 +543,7 @@ export function Deploy() {
         status: 'pending',
       });
 
+      await assertBroadcast(deployed.txHash, 'Create the bot contract');
       const deployReceipt = await client.waitReceipt(deployed.txHash, 120000);
       if (!deployReceipt.success) throw new Error('Contract deployment transaction reverted. Check the transaction in the explorer.');
       address = deployed.contractAddress || (deployReceipt as any)?.recipient || (deployReceipt as any)?.contractAddress || '';
@@ -533,9 +581,8 @@ export function Deploy() {
         owner: wallet.address,
       });
 
-      // STEP 2: Verify deployed source hash (resilient with polling and format tolerance)
-      setCurrentStep(2);
-      setStage('2/5 · Verifying deployed source hash');
+      // Verify deployed source hash quietly; it needs no wallet approval.
+      setStage('Checking the published code…');
       let deployedSource = '';
       let deployedMeta: any = {};
       const normExpected = source.trim();
@@ -571,7 +618,7 @@ export function Deploy() {
         (readBackTrimmedHash && validHashes.includes(readBackTrimmedHash));
 
       if (isVerified) {
-        setStage('2/5 · Source hash verified on-chain');
+        // Source matches; nothing for the user to do here.
       } else {
         console.warn('Source verification notice: hash indexing or format difference', {
           expectedHash,
@@ -581,12 +628,15 @@ export function Deploy() {
         setResultWarning('Contract deployed. Source hash is being indexed by the network.');
       }
 
-      // STEP 3: Initializing strategy and funding cron schedule
-      setCurrentStep(3);
+      // STEP 2: Initializing strategy and funding cron schedule
+      setCurrentStep(2);
       setStepStatus('waiting_signature');
-      setStage('3/5 · Initializing strategy and funding cron schedule (Please sign in wallet)');
+      setStage('Wallet approval 2 — turn the bot on');
       const nativeStrategyBudget = template.id === 'dca' || template.id === 'grid' ? BigInt(buyBudgetAseWei || '0') : 0n;
-      const initHash = await client.call(address, 'init', args, gasEscrow + nativeStrategyBudget);
+      const initHash = await withWalletTimeout(
+        client.call(address, 'init', args, gasEscrow + nativeStrategyBudget),
+        'Start the schedule',
+      );
       setTxHashes((prev) => ({ ...prev, init: initHash }));
       setStepStatus('confirming');
       saveUserTx(wallet.address, {
@@ -598,6 +648,7 @@ export function Deploy() {
         strategyAddress: address,
       });
 
+      await assertBroadcast(initHash, 'Start the schedule');
       const initReceipt = await client.waitReceipt(initHash, 120000);
       if (!initReceipt.success) throw new Error('The contract was deployed, but init() reverted. The strategy is not armed.');
       saveUserTx(wallet.address, {
@@ -634,10 +685,13 @@ export function Deploy() {
 
       // STEP 4: Fund strategy token allocation
       if (template.trades && template.id !== 'dca') {
-        setCurrentStep(4);
+        setCurrentStep(3);
         setStepStatus('waiting_signature');
-        setStage(`4/5 · Transferring ${budget} ${selectedPool.symbol} allocation (Please sign in wallet)`);
-        const transferHash = await client.call(selectedPool.token, 'transfer', [address, tokenBudget.toString()]);
+        setStage(`Wallet approval 3 — deposit ${budget} ${selectedPool.symbol}`);
+        const transferHash = await withWalletTimeout(
+          client.call(selectedPool.token, 'transfer', [address, tokenBudget.toString()]),
+          'Deposit the tokens',
+        );
         setTxHashes((prev) => ({ ...prev, fund: transferHash }));
         setStepStatus('confirming');
         saveUserTx(wallet.address, {
@@ -649,6 +703,7 @@ export function Deploy() {
           strategyAddress: address,
         });
 
+        await assertBroadcast(transferHash, 'Deposit the tokens');
         const transferReceipt = await client.waitReceipt(transferHash, 120000);
         if (!transferReceipt.success) throw new Error(`Strategy is initialized, but token funding failed. Contract: ${address}.`);
         saveUserTx(wallet.address, {
@@ -685,13 +740,17 @@ export function Deploy() {
         });
       }
 
-      // STEP 5: Registering strategy in Strata Hub
-      setCurrentStep(5);
-      setStepStatus('waiting_signature');
-      setStage('5/5 · Registering strategy in Strata Hub (Please sign in wallet)');
+      // STEP 3/4: Optional leaderboard publication.
       let registrationHash = '';
-      try {
-        registrationHash = await client.call(STRATA_HUB, 'registerStrategy', [address, template.id, selectedPool.id]);
+      if (publishToHub) {
+        setCurrentStep(needsFund ? 4 : 3);
+        setStepStatus('waiting_signature');
+        setStage(`Wallet approval ${needsFund ? 4 : 3} — publish to the leaderboard`);
+        try {
+        registrationHash = await withWalletTimeout(
+          client.call(STRATA_HUB, 'registerStrategy', [address, template.id, selectedPool.id]),
+          'Publish to the Strata Hub',
+        );
         setTxHashes((prev) => ({ ...prev, register: registrationHash }));
         setStepStatus('confirming');
         saveUserTx(wallet.address, {
@@ -703,6 +762,7 @@ export function Deploy() {
           strategyAddress: address,
         });
 
+        await assertBroadcast(registrationHash, 'Publish to the Strata Hub');
         const registrationReceipt = await client.waitReceipt(registrationHash, 120000);
         setRegistrationOk(Boolean(registrationReceipt.success));
         saveUserTx(wallet.address, {
@@ -715,8 +775,9 @@ export function Deploy() {
         });
 
         if (!registrationReceipt.success) setResultWarning('Strategy is live and funded, but Strata Hub registration reverted.');
-      } catch (registrationError) {
-        setResultWarning(`Strategy is live and funded, but Hub registration failed: ${registrationError instanceof Error ? registrationError.message : String(registrationError)}`);
+        } catch (registrationError) {
+          setResultWarning(`The bot is live and funded, but leaderboard publishing failed: ${registrationError instanceof Error ? registrationError.message : String(registrationError)}`);
+        }
       }
 
       saveUserStrategy({
@@ -743,9 +804,9 @@ export function Deploy() {
         owner: wallet.address,
       });
 
-      setCurrentStep(6);
+      setCurrentStep(totalSteps + 1);
       setStepStatus('done');
-      setStage('Deployment complete');
+      setStage('Bot is live');
     } catch (err) {
       let msg = err instanceof Error ? err.message : String(err);
       if (/session|expired|locked/i.test(msg)) {
@@ -815,6 +876,43 @@ export function Deploy() {
     if (template.id === 'grid') setBuySizeAse(divAmount(amount, levelCount));
     else if (numBuySize > (Number(amount) || 0)) setBuySizeAse(divAmount(amount, 4));
   };
+
+  // Friendly defaults: the shipped starting amounts can exceed a small testnet
+  // balance, which used to dead-end the launch on a balance check. Size them to
+  // what the wallet actually holds once, then leave every field editable.
+  const autoSizedRef = useRef('');
+  useEffect(() => {
+    if (mode !== 'lite' || !wallet.connected || !selectedPool) return;
+    const key = `${selectedPool.id}:${template.id}`;
+    if (autoSizedRef.current === key) return;
+
+    const trim = (value: number, digits: number) =>
+      value.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '') || '0';
+
+    if (template.id === 'risk-managed' && !costBasis.trim()) {
+      setCostBasis(weiToAse(selectedPool.spot, 6));
+    }
+    if (
+      template.trades && template.id !== 'dca' &&
+      currentTokenHolding && currentTokenHolding.balanceNum > 0 &&
+      Number(budget) > currentTokenHolding.balanceNum
+    ) {
+      const nextBudget = trim(currentTokenHolding.balanceNum * 0.5, botDecimals);
+      setBudget(nextBudget);
+      const parts = template.id === 'twap' ? sliceCount : template.id === 'grid' ? levelCount : 1;
+      setSize(divAmount(nextBudget, parts));
+    }
+    if (
+      (template.id === 'dca' || template.id === 'grid') &&
+      nativeHolding && nativeHolding.balanceNum > 0.2 &&
+      Number(buyBudgetAse) > nativeHolding.balanceNum - 0.2
+    ) {
+      const nextBudget = trim(Math.max(0, nativeHolding.balanceNum - 0.2) * 0.5, 4);
+      setBuyBudgetAse(nextBudget);
+      setBuySizeAse(divAmount(nextBudget, template.id === 'grid' ? levelCount : 1));
+    }
+    autoSizedRef.current = key;
+  }, [mode, wallet.connected, selectedPool, template.id, currentTokenHolding, nativeHolding, budget, buyBudgetAse, costBasis, botDecimals, sliceCount, levelCount]);
 
   const selectBotType = (id: string) => {
     const next = templateById(id);
@@ -903,6 +1001,9 @@ export function Deploy() {
     previewLead = `${template.name}: ${template.liteDesc}`;
   }
 
+  const needsFund = template.trades && template.id !== 'dca';
+  const totalSteps = 2 + (needsFund ? 1 : 0) + (publishToHub ? 1 : 0);
+
   const launchDisabled =
     deploying ||
     !selectedPool ||
@@ -910,6 +1011,7 @@ export function Deploy() {
     ((template.id === 'dca' || template.id === 'grid') && (!buySizeAseWei || !buyBudgetAseWei));
 
   const intervalChips = [
+    { label: '5 min', value: 300 },
     { label: '15 min', value: 900 },
     { label: '1 hour', value: 3600 },
     { label: '4 hours', value: 14400 },
@@ -950,8 +1052,8 @@ export function Deploy() {
         <span className="label">Create a bot · Asentum testnet</span>
         <h1 className="detail-title">Launch a trading bot.</h1>
         <p className="section-note" style={{ maxWidth: 640, marginTop: 18 }}>
-          Pick what the bot should do, choose the token and amount, then read the plan in plain language.
-          Your wallet signs every step — and you can stop the bot or withdraw your funds at any time.
+          Pick what the bot should do, choose the token and amount, then press launch. You only confirm a few wallet
+          prompts — no pasting, no config files — and you can close the bot and get your funds back at any time.
         </p>
         <div className="mode-switch" role="group" aria-label="Interface mode">
           <button type="button" className={mode === 'lite' ? 'mode-option active' : 'mode-option'} onClick={() => setMode('lite')}>
@@ -1120,7 +1222,7 @@ export function Deploy() {
                       <div className="field" style={{ marginTop: 0 }}>
                         <label>Target price & payout</label>
                         <div className="mono" style={{ fontSize: 16, paddingTop: 6 }}>{amt(targetPrice, 6)} ASE</div>
-                        <small className="muted mono" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                        <small className="muted mono" style={{ fontSize: 13, display: 'block', marginTop: 4 }}>
                           You receive: <strong style={{ color: 'var(--accent)' }}>~{amt(estAseOut, 4)} ASE</strong>
                         </small>
                       </div>
@@ -1322,6 +1424,18 @@ export function Deploy() {
                   </div>
                 )}
 
+                <label className="hub-toggle" style={{ display: 'flex', gap: 9, alignItems: 'flex-start', margin: '2px 0 12px', fontSize: 12.5, lineHeight: 1.5, color: 'var(--muted)', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={publishToHub}
+                    onChange={(event) => setPublishToHub(event.target.checked)}
+                    style={{ marginTop: 2, accentColor: 'var(--accent)' }}
+                  />
+                  <span>
+                    Show this bot on the public leaderboard
+                    <span className="dim"> · optional, adds one wallet approval</span>
+                  </span>
+                </label>
                 <button className="btn btn-primary launch-btn" type="button" onClick={deployLite} disabled={launchDisabled || isWalletLocked}>
                   {deploying ? 'Deploying & Initializing…' : !wallet.connected ? 'Connect wallet to launch' : isWalletLocked ? '🔒 Unlock wallet in browser to launch' : `Launch ${activeBot.title} bot`}
                 </button>
@@ -1332,7 +1446,7 @@ export function Deploy() {
                   <div className="deploy-result">
                     <div className="live-dot">Contract deployed</div>
                     <a className="mono" href={`https://explorer.asentum.com/address/${displayAseAddress(resultAddress)}`} target="_blank" rel="noreferrer">{displayAseAddress(resultAddress)}</a>
-                    <div className="muted">{registrationOk ? 'Registered in Strata Hub.' : 'Check the registration warning above.'} Review the transaction receipts in the explorer.</div>
+                    <div className="muted">{registrationOk ? 'Published to the leaderboard.' : publishToHub ? 'Check the leaderboard warning above.' : 'Saved in your Portfolio.'} Review the transaction receipts in the explorer.</div>
                   </div>
                 )}
               </div>
@@ -1421,11 +1535,11 @@ export function Deploy() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
                       <div>
                         <strong style={{ fontSize: 16 }}>{selectedPool.symbol} / ASE</strong>
-                        <span className="mono dim" style={{ fontSize: 12, marginLeft: 8 }}>pool #{selectedPool.id}</span>
+                        <span className="mono dim" style={{ fontSize: 13.5, marginLeft: 8 }}>pool #{selectedPool.id}</span>
                       </div>
                       <span className="pill pill-live">Spot: {weiToAse(selectedPool.spot, 6)} ASE</span>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginTop: 10, fontSize: 12 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginTop: 10, fontSize: 13.5 }}>
                       <div><span className="label">Reserves ({selectedPool.symbol})</span><div className="mono">{weiToAse(selectedPool.reserveToken, 2)}</div></div>
                       <div><span className="label">Reserves (ASE)</span><div className="mono">{weiToAse(selectedPool.reserveNative, 2)}</div></div>
                       <div><span className="label">Token address</span><div className="mono break-value">{selectedPool.token}</div></div>
@@ -1445,7 +1559,7 @@ export function Deploy() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <label htmlFor="budget">Total token budget to deposit</label>
                       {currentTokenHolding && (
-                        <span className="muted" style={{ fontSize: 12 }}>
+                        <span className="muted" style={{ fontSize: 13.5 }}>
                           Bal: <strong className="mono">{currentTokenHolding.balanceFmt}</strong>
                           <button type="button" className="quick-bal-btn" onClick={() => applyTokenPercent(0.25)}>25%</button>
                           <button type="button" className="quick-bal-btn" onClick={() => applyTokenPercent(0.5)}>50%</button>
@@ -1468,7 +1582,7 @@ export function Deploy() {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <label htmlFor="buyBudgetAse">{template.id === 'grid' ? 'Total ASE buy reserve' : 'Total ASE DCA budget'}</label>
                           {nativeHolding && (
-                            <span className="muted" style={{ fontSize: 12 }}>
+                            <span className="muted" style={{ fontSize: 13.5 }}>
                               Bal: <strong className="mono">{nativeHolding.balanceFmt} ASE</strong>
                               <button type="button" className="quick-bal-btn" onClick={() => applyAsePercent(0.25)}>25%</button>
                               <button type="button" className="quick-bal-btn" onClick={() => applyAsePercent(0.5)}>50%</button>
@@ -1539,9 +1653,11 @@ export function Deploy() {
 
               <div className="row-2">
                 <div className="field">
-                  <label htmlFor="interval">Interval · seconds</label>
+                  <label htmlFor="interval">Execution interval · seconds</label>
                   <input id="interval" className="input" value={interval} onChange={(event) => setInterval(Number(event.target.value))} inputMode="numeric" min={60} max={86400} disabled={!supportsCustomInterval} />
                   {!supportsCustomInterval && <p className="field-help">This template uses its fixed on-chain schedule. Custom intervals must be 60–86,400 seconds.</p>}
+                  {supportsCustomInterval && <div className="chip-row"><button type="button" className={interval === 60 ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(60)}>1 min</button><button type="button" className={interval === 300 ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(300)}>5 min</button><button type="button" className={interval === 900 ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(900)}>15 min</button><button type="button" className={interval === 3600 ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(3600)}>1 hour</button></div>}
+                  {chartTfLabel && <p className="field-help">You opened this builder from a {chartTfLabel} chart. That chart interval is for visual analysis only; the execution interval above controls how often Cron runs the strategy.</p>}
                 </div>
                 <div className="field">
                   <label htmlFor="levelsPro">Levels / slices</label>
@@ -1552,7 +1668,8 @@ export function Deploy() {
                 </div>
               </div>
 
-              <div className="pro-command">
+              <details className="dev-accordion pro-command" style={{ marginTop: 18 }}>
+                <summary>Advanced: deploy from the terminal (optional — not needed here)</summary>
                 <div className="panel-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span className="label">PowerShell · CLI command</span>
                   <span className="pill pill-live">{sourceType === 'asepad' ? 'AseDex AMM' : 'Auras AMM'}</span>
@@ -1564,7 +1681,7 @@ export function Deploy() {
                 <div className="panel-body">
                   <p className="muted">Run from the project root in PowerShell. The local CLI signs with the seed in <code>.strata/seed.json</code> or the <code>STRATA_SEED</code> environment variable. Back up the seed securely; do not send it to anyone.</p>
                 </div>
-              </div>
+              </details>
 
               <div className="lite-deploy-panel" style={{ marginTop: 18 }}>
                 <div>
@@ -1581,7 +1698,7 @@ export function Deploy() {
                   <div className="deploy-result">
                     <div className="live-dot">Contract deployed</div>
                     <a className="mono" href={`https://explorer.asentum.com/address/${displayAseAddress(resultAddress)}`} target="_blank" rel="noreferrer">{displayAseAddress(resultAddress)}</a>
-                    <div className="muted">{registrationOk ? 'Registered in Strata Hub.' : 'Check the registration warning above.'} Review the transaction receipts in the explorer.</div>
+                    <div className="muted">{registrationOk ? 'Published to the leaderboard.' : publishToHub ? 'Check the leaderboard warning above.' : 'Saved in your Portfolio.'} Review the transaction receipts in the explorer.</div>
                   </div>
                 )}
               </div>
@@ -1589,7 +1706,7 @@ export function Deploy() {
               <div className="panel" style={{ marginTop: 20 }}>
                 <div className="panel-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span className="label">Live {sourceType === 'asepad' ? 'AseDex' : 'Auras'} pairs ({(sourceType === 'asepad' ? asedexPools.loading : pools.loading) ? '…' : livePools.length})</span>
-                  <span className="mono dim" style={{ fontSize: 11 }}>Asentum testnet</span>
+                  <span className="mono dim" style={{ fontSize: 13 }}>Asentum testnet</span>
                 </div>
                 <div className="panel-body pool-live-list">
                   {livePools.slice(0, 12).map((pool) => (
@@ -1718,9 +1835,9 @@ export function Deploy() {
           <div className="deploy-modal">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <h3 style={{ margin: 0, fontSize: 18 }}>
-                {currentStep === 6 ? 'Bot is live' : `Launching ${activeBot.title} bot`}
+                {currentStep > totalSteps ? 'Bot is live' : `Launching ${activeBot.title} bot`}
               </h3>
-              {(!deploying || currentStep === 6 || stepStatus === 'error') && (
+              {(!deploying || currentStep > totalSteps || stepStatus === 'error') && (
                 <button
                   type="button"
                   className="btn btn-ghost"
@@ -1733,16 +1850,16 @@ export function Deploy() {
             </div>
 
             <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>
-              {currentStep === 6
-                ? 'Your bot contract is live, initialized, funded, and registered in Strata Hub on Asentum.'
-                : 'Follow the 5 steps below. Keep this tab open and confirm each wallet prompt as it appears.'}
+              {currentStep > totalSteps
+                ? 'Your bot is live on Asentum. You can close it and get your funds back from Portfolio at any time.'
+                : 'Approve each wallet prompt as it appears — that is all. Keep this tab open while the network confirms.'}
             </p>
 
             <div className="deploy-stepper-progress">
               <div
                 className="deploy-stepper-bar"
                 style={{
-                  width: currentStep === 6 ? '100%' : `${Math.max(10, ((currentStep - 1) / 5) * 100)}%`,
+                  width: currentStep > totalSteps ? '100%' : `${Math.max(10, ((currentStep - 1) / totalSteps) * 100)}%`,
                   background: stepStatus === 'error' ? 'var(--down)' : undefined,
                 }}
               />
@@ -1757,12 +1874,12 @@ export function Deploy() {
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <strong>1. Create the bot contract</strong>
                     {txHashes.deploy && (
-                      <a href={explorerTxUrl(txHashes.deploy)} target="_blank" rel="noreferrer" className="mono" style={{ fontSize: 12, color: 'var(--accent)' }}>
+                      <a href={explorerTxUrl(txHashes.deploy)} target="_blank" rel="noreferrer" className="mono" style={{ fontSize: 13.5, color: 'var(--accent)' }}>
                         Tx ↗
                       </a>
                     )}
                   </div>
-                  <div className="muted" style={{ fontSize: 12 }}>
+                  <div className="muted" style={{ fontSize: 13.5 }}>
                     {currentStep === 1 && stepStatus === 'waiting_signature' && 'Please sign the contract deployment in your wallet…'}
                     {currentStep === 1 && stepStatus === 'confirming' && 'Waiting for block confirmation…'}
                     {currentStep > 1 && (resultAddress ? `Deployed at ${toAse1(resultAddress).slice(0, 10)}…` : 'Contract created')}
@@ -1775,78 +1892,67 @@ export function Deploy() {
                   {currentStep > 2 ? '✓' : '2'}
                 </div>
                 <div style={{ flex: 1 }}>
-                  <strong>2. Verify the published code</strong>
-                  <div className="muted" style={{ fontSize: 12 }}>
-                    {currentStep === 2 && 'Comparing the source hash on Asentum…'}
-                    {currentStep > 2 && 'Source hash matches the deployed contract'}
-                  </div>
-                </div>
-              </div>
-
-              <div className={`stepper-item ${currentStep === 3 ? 'active' : currentStep > 3 ? 'done' : ''}`}>
-                <div className={`stepper-icon ${currentStep > 3 ? 'done' : currentStep === 3 ? (stepStatus === 'error' ? 'error' : 'active') : 'pending'}`}>
-                  {currentStep > 3 ? '✓' : '3'}
-                </div>
-                <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <strong>3. Start the schedule</strong>
+                    <strong>2. Turn the bot on</strong>
                     {txHashes.init && (
-                      <a href={explorerTxUrl(txHashes.init)} target="_blank" rel="noreferrer" className="mono" style={{ fontSize: 12, color: 'var(--accent)' }}>
+                      <a href={explorerTxUrl(txHashes.init)} target="_blank" rel="noreferrer" className="mono" style={{ fontSize: 13.5, color: 'var(--accent)' }}>
                         Tx ↗
                       </a>
                     )}
                   </div>
-                  <div className="muted" style={{ fontSize: 12 }}>
-                    {currentStep === 3 && stepStatus === 'waiting_signature' && 'Please sign the init() call in your wallet to schedule runs…'}
-                    {currentStep === 3 && stepStatus === 'confirming' && 'Confirming schedule on Asentum…'}
-                    {currentStep > 3 && 'Schedule armed with Cron'}
+                  <div className="muted" style={{ fontSize: 13.5 }}>
+                    {currentStep === 2 && stepStatus === 'waiting_signature' && 'Confirm the start in your wallet…'}
+                    {currentStep === 2 && stepStatus === 'confirming' && 'Arming the schedule on Asentum…'}
+                    {currentStep > 2 && 'Schedule armed — the bot is running'}
                   </div>
                 </div>
               </div>
 
-              {template.trades && template.id !== 'dca' && (
-                <div className={`stepper-item ${currentStep === 4 ? 'active' : currentStep > 4 ? 'done' : ''}`}>
-                  <div className={`stepper-icon ${currentStep > 4 ? 'done' : currentStep === 4 ? (stepStatus === 'error' ? 'error' : 'active') : 'pending'}`}>
-                    {currentStep > 4 ? '✓' : '4'}
+              {needsFund && (
+                <div className={`stepper-item ${currentStep === 3 ? 'active' : currentStep > 3 ? 'done' : ''}`}>
+                  <div className={`stepper-icon ${currentStep > 3 ? 'done' : currentStep === 3 ? (stepStatus === 'error' ? 'error' : 'active') : 'pending'}`}>
+                    {currentStep > 3 ? '✓' : '3'}
                   </div>
                   <div style={{ flex: 1 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <strong>4. Deposit the tokens</strong>
+                      <strong>3. Deposit the tokens</strong>
                       {txHashes.fund && (
-                        <a href={explorerTxUrl(txHashes.fund)} target="_blank" rel="noreferrer" className="mono" style={{ fontSize: 12, color: 'var(--accent)' }}>
+                        <a href={explorerTxUrl(txHashes.fund)} target="_blank" rel="noreferrer" className="mono" style={{ fontSize: 13.5, color: 'var(--accent)' }}>
                           Tx ↗
                         </a>
                       )}
                     </div>
-                    <div className="muted" style={{ fontSize: 12 }}>
-                      {currentStep === 4 && stepStatus === 'waiting_signature' && `Please approve transfer of ${budget} ${selectedPool?.symbol} in your wallet…`}
-                      {currentStep === 4 && stepStatus === 'confirming' && 'Confirming token transfer…'}
-                      {currentStep > 4 && `${budget} ${selectedPool?.symbol} deposited`}
+                    <div className="muted" style={{ fontSize: 13.5 }}>
+                      {currentStep === 3 && stepStatus === 'waiting_signature' && `Confirm the transfer of ${budget} ${selectedPool?.symbol} in your wallet…`}
+                      {currentStep === 3 && stepStatus === 'confirming' && 'Confirming token transfer…'}
+                      {currentStep > 3 && `${budget} ${selectedPool?.symbol} deposited`}
                     </div>
                   </div>
                 </div>
               )}
 
-              <div className={`stepper-item ${currentStep === 5 ? 'active' : currentStep > 5 ? 'done' : ''}`}>
-                <div className={`stepper-icon ${currentStep > 5 ? 'done' : currentStep === 5 ? (stepStatus === 'error' ? 'error' : 'active') : 'pending'}`}>
-                  {currentStep > 5 ? '✓' : '5'}
+              {publishToHub && (
+              <div className={`stepper-item ${currentStep === 4 ? 'active' : currentStep > 4 ? 'done' : ''}`}>
+                <div className={`stepper-icon ${currentStep > 4 ? 'done' : currentStep === 4 ? (stepStatus === 'error' ? 'error' : 'active') : 'pending'}`}>
+                  {currentStep > 4 ? '✓' : '4'}
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <strong>5. Publish to the Strata Hub</strong>
+                    <strong>4. Publish to the leaderboard</strong>
                     {txHashes.register && (
-                      <a href={explorerTxUrl(txHashes.register)} target="_blank" rel="noreferrer" className="mono" style={{ fontSize: 12, color: 'var(--accent)' }}>
+                      <a href={explorerTxUrl(txHashes.register)} target="_blank" rel="noreferrer" className="mono" style={{ fontSize: 13.5, color: 'var(--accent)' }}>
                         Tx ↗
                       </a>
                     )}
                   </div>
-                  <div className="muted" style={{ fontSize: 12 }}>
-                    {currentStep === 5 && stepStatus === 'waiting_signature' && 'Please confirm public registration in Strata Hub…'}
-                    {currentStep === 5 && stepStatus === 'confirming' && 'Registering for the leaderboard…'}
-                    {currentStep > 5 && 'Registered in Strata Hub'}
+                  <div className="muted" style={{ fontSize: 13.5 }}>
+                    {currentStep === 4 && stepStatus === 'waiting_signature' && 'Confirm the leaderboard listing in your wallet…'}
+                    {currentStep === 4 && stepStatus === 'confirming' && 'Publishing to the leaderboard…'}
+                    {currentStep > 4 && 'Published to the leaderboard'}
                   </div>
                 </div>
               </div>
+              )}
             </div>
 
             {stepError && (
@@ -1858,10 +1964,10 @@ export function Deploy() {
                     <strong style={{ color: 'var(--warn)', display: 'flex', alignItems: 'center', gap: 6 }}>
                       🔒 Wallet is locked in browser extension
                     </strong>
-                    <p style={{ margin: '4px 0 0', fontSize: 12, lineHeight: 1.5 }}>
+                    <p style={{ margin: '4px 0 0', fontSize: 13.5, lineHeight: 1.5 }}>
                       The Asentum browser extension requires your password before signing transactions.
                     </p>
-                    <ol style={{ margin: '6px 0 0', paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
+                    <ol style={{ margin: '6px 0 0', paddingLeft: 18, fontSize: 13.5, lineHeight: 1.5 }}>
                       <li>Click the <strong>Asentum extension icon</strong> in your browser toolbar (top right).</li>
                       <li>Enter your <strong>password</strong> to unlock the wallet.</li>
                       <li>Click <strong>«🔓 I unlocked it — Retry»</strong> below.</li>
@@ -1869,7 +1975,7 @@ export function Deploy() {
                   </div>
                 )}
                 {resultAddress && (
-                  <p className="muted" style={{ margin: '8px 0 0', fontSize: 12 }}>
+                  <p className="muted" style={{ margin: '8px 0 0', fontSize: 13.5 }}>
                     The contract was deployed at {shortAddr(resultAddress)} and is saved in your Portfolio.
                   </p>
                 )}
@@ -1877,7 +1983,7 @@ export function Deploy() {
             )}
 
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 16 }}>
-              {currentStep === 6 ? (
+              {currentStep > totalSteps ? (
                 <>
                   <Link to="/portfolio" className="btn btn-ghost" onClick={() => setModalOpen(false)}>
                     View in Portfolio

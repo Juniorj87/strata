@@ -400,6 +400,8 @@ export function strategyRows(snapshot: ProtocolSnapshot): StrategyRow[] {
 export interface WalletRow {
   wallet: string;
   strategies: number;
+  /** Strategies whose cron job is still scheduled and not stopped. */
+  running: number;
   fills: number;
   grossAseWei: string;
   spentAseWei: string;
@@ -417,6 +419,7 @@ export function walletRows(snapshot: ProtocolSnapshot): WalletRow[] {
     const row = map.get(wallet) ?? {
       wallet,
       strategies: 0,
+      running: 0,
       fills: 0,
       grossAseWei: '0',
       spentAseWei: '0',
@@ -425,6 +428,7 @@ export function walletRows(snapshot: ProtocolSnapshot): WalletRow[] {
       lastFillAt: null,
     };
     row.strategies += 1;
+    if (strategy.cron !== null && strategy.stopped !== true) row.running += 1;
     row.fills += Math.max(strategy.fillEvents.length, strategy.trades);
     row.grossAseWei = (asBig(row.grossAseWei) + asBig(strategy.realisedWei)).toString();
     row.spentAseWei = (asBig(row.spentAseWei) + asBig(strategy.spentAseWei)).toString();

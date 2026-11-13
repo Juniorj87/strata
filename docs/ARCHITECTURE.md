@@ -268,10 +268,9 @@ The application interacts with the Asentum blockchain through:
 
 ### Planned Enhancements
 
-- Strategy backtesting
-- Performance analytics dashboard
-- Strategy marketplace
-- Advanced order types
+- Strategy backtesting and paper simulation
+- Native order-book integration, if an Asentum venue exposes a matching engine
+- Perpetuals integration after an external provider publishes contracts/API and risk specifications
 - Multi-chain support
 
 ---
@@ -299,10 +298,6 @@ Thus `Total Bots = Active + Paused + Idle`. “Scheduled” is the active schedu
 
 Execution counts and ASE amounts are sourced from verified contract swap/fill events and contract accounting fields. The shared protocol snapshot aggregates strategy `trades`, indexed fill receipts, `realisedWei`, `spentAseWei`, and `markValueAseWei`; token quantities retain their own token decimals and are not summed across assets. **Gross ASE received is gross token-to-ASE proceeds, not net profit or ROI.** It excludes a verified cost basis and must not be labeled as profit. Open inventory is a live AMM quote and can change with pool prices and liquidity.
 
-### Compass
-
-Compass markers represent verified strategies from the same protocol snapshot. Marker details are sourced from each strategy's name, template, symbol, stop/cron state, trade count, and indexed fill timestamps. “Last execution” is the most recent indexed fill timestamp available to that strategy; “Next run” is derived from the cron record's `nextRunAt` (seconds or milliseconds). Missing chain fields are displayed as unavailable rather than fabricated. The visual clock/countdown is presentation only and does not trigger an execution.
-
 ### Analytics versus Leaderboard
 
 Analytics is a protocol-level time-series view: it applies a selected range to indexed fill timestamps and groups executions and ASE volume into buckets, with pair activity/strategy distribution. Leaderboard is a ranking view: verified strategy rows are sorted by selected measurable values (fills, gross ASE, inventory mark, or last fill), with creator/strategy identity and links to contract detail. These are separate projections of the same underlying indexed source, not separate sources of truth. No profitability ranking is claimed without a trustworthy cost basis.
@@ -310,3 +305,18 @@ Analytics is a protocol-level time-series view: it applies a selected range to i
 ### Data limitations
 
 Indexer coverage and timestamp availability can bound historical views. A stale snapshot may be shown after a refresh error; the UI should label it as stale. Missing timestamps cannot be reliably assigned to a time-window chart. Contract/source verification is an integrity check and is not a security audit or guarantee of strategy performance.
+
+
+## Current trading surfaces (2026-11-13)
+
+The current UI separates simple spot swaps (`/swap`), the manual trading workspace (`/advanced`) and contract automation (`/deploy`).
+
+Advanced Trading reads indexed pairs, OHLCV candles and recent fills through `src/lib/marketData.ts`. Market swaps use the on-chain AMM quote/swap path. The Auras v2 limit-order adapter is isolated in `src/lib/limitOrders.ts`; its escrowed AMM orders are not a conventional order book. Market selection is carried into the bot builder using the on-chain `chainPoolId` and venue, not the indexer's display key.
+
+The chart exposes 1m, 5m, 15m, 30m, 1h, 4h, 1d and 1w. The 30m and 1w views are aggregated from indexed source buckets. Missing intervals remain empty; no synthetic prices are generated. The chart timeframe is not the bot execution interval. Asentum Cron's documented minimum recurring interval is one minute.
+
+`src/lib/tokenFactory.ts` deploys a fixed-supply ARC-20 contract and initializes it in a separate wallet-signed transaction. `src/lib/walletRegistry.ts` is an opt-in, browser-local registry of public wallet addresses; it does not upload addresses to a server.
+
+`src/lib/perps.ts` is an unconfigured provider adapter. No public AsePad perps contract/API is connected, so no perp position or pricing is simulated.
+
+See [PRODUCT_GUIDE.md](PRODUCT_GUIDE.md) for the current feature matrix and behaviour boundaries.

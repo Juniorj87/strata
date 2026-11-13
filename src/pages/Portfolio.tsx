@@ -2,14 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
-import { loadPools, loadAseDexPools, loadStrategies } from '../lib/registry';
+import { loadPools, loadAseDexPools, loadStrategies, type LivePool } from '../lib/registry';
 import { explorerAddressUrl, explorerTxUrl, toAse1, toHexAddress } from '../lib/rpc';
 import { fmtWei, shortAddr, weiToAse } from '../lib/format';
 import { botTypeFor } from '../lib/templates';
+import { closeBot } from '../lib/botLifecycle';
+import { WalletRegistryPanel } from '../components/WalletRegistryPanel';
 import {
   fetchUserTokenHoldings,
   getUserStrategies,
   getUserTxs,
+  removeUserStrategy,
   saveUserStrategy,
   saveUserTx,
   type DeployedStrategyRecord,
@@ -37,6 +40,11 @@ function statusOf(
   if (liveMatch) {
     if (liveMatch.stopped) return { label: 'Stopped', className: 'status-badge off' };
     if (liveMatch.cron !== null) return { label: 'Running', className: 'status-badge live' };
+    // The contract is armed but its cron job is gone (the gas escrow was
+    // spent), so it can never trade again even though stopped is false.
+    if (status !== 'deployed' && status !== 'initialized') {
+      return { label: 'Schedule ended', className: 'status-badge off' };
+    }
   }
   switch (status) {
     case 'active': return { label: 'Running', className: 'status-badge live' };
@@ -72,6 +80,29 @@ function amountLabel(record: DeployedStrategyRecord): string {
 
 const ALLOC_COLORS = ['var(--accent)', 'var(--accent-2)', 'var(--up)', 'var(--warn)', 'var(--dim)'];
 
+/**
+ * What the pool would actually pay for this whole balance after price impact
+ * and fees (constant product, fee taken on the input side). Spot price times
+ * quantity is not money: a large balance in a shallow pool is worth far less,
+ * which is exactly how a 500k memecoin bag used to show up as 181k ASE.
+ */
+function sellValueAse(pool: LivePool | undefined, rawBalance: string): number | null {
+  if (!pool) return null;
+  try {
+    const amount = BigInt(rawBalance);
+    const reserveIn = BigInt(pool.reserveToken);
+    const reserveOut = BigInt(pool.reserveNative);
+    if (amount <= 0n || reserveIn <= 0n || reserveOut <= 0n) return 0;
+    const feeBps = BigInt(pool.feeBps || '30');
+    const effective = (amount * (10_000n - feeBps)) / 10_000n;
+    if (effective <= 0n) return 0;
+    const out = (reserveOut * effective) / (reserveIn + effective);
+    return Number(out) / 1e18;
+  } catch {
+    return null;
+  }
+}
+
 export function Portfolio() {
   const wallet = useWallet();
   const client = useAsentum();
@@ -81,6 +112,7 @@ export function Portfolio() {
   const [loadingHoldings, setLoadingHoldings] = useState(false);
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [stopping, setStopping] = useState<string | null>(null);
+  const [listTick, setListTick] = useState(0);
   const [botNotice, setBotNotice] = useState<Record<string, { kind: 'ok' | 'err'; text: string }>>({});
 
   const pools = useAsync(() => loadPools(), 60_000);
@@ -114,48 +146,72 @@ export function Portfolio() {
     void refreshHoldings();
   }, [refreshHoldings]);
 
-  const userStrategies: DeployedStrategyRecord[] = wallet.connected && wallet.address
-    ? getUserStrategies(wallet.address)
-    : [];
+  const userStrategies: DeployedStrategyRecord[] = useMemo(
+    () => (wallet.connected && wallet.address ? getUserStrategies(wallet.address) : []),
+    [wallet.connected, wallet.address, listTick],
+  );
 
-  const stopBot = async (record: DeployedStrategyRecord) => {
+  const removeUnfinished = (record: DeployedStrategyRecord) => {
+    removeUserStrategy(record.address, wallet.address ?? undefined);
+    setBotNotice((prev) => {
+      const next = { ...prev };
+      delete next[record.address];
+      return next;
+    });
+    setListTick((value) => value + 1);
+  };
+
+  const closeBotRecord = async (record: DeployedStrategyRecord, alreadyStopped: boolean) => {
     if (!wallet.connected || !wallet.address) {
       wallet.openConnect();
       return;
     }
+    const owner = wallet.address;
+    const recipient = wallet.ase1Address || toHexAddress(owner);
+    const notice = (kind: 'ok' | 'err', text: string) =>
+      setBotNotice((prev) => ({ ...prev, [record.address]: { kind, text } }));
     setStopping(record.address);
-    setBotNotice((prev) => ({ ...prev, [record.address]: { kind: 'ok', text: 'Confirm the stop in your wallet…' } }));
+    notice('ok', alreadyStopped ? 'Reading what is left in the bot…' : 'Closing the bot — approve each wallet prompt as it appears…');
     try {
-      const hash = await client.call(record.address, 'stop', []);
-      saveUserTx(wallet.address, {
-        hash,
-        type: 'cancel',
-        description: `Stop ${record.templateName ?? record.template} bot`,
-        timestamp: Date.now(),
-        status: 'pending',
-        strategyAddress: record.address,
+      const result = await closeBot({
+        client,
+        contract: record.address,
+        balanceAddress: toHexAddress(record.address),
+        recipient,
+        token: record.tokenAddress || null,
+        supportsTokenWithdraw: record.template !== 'momentum-signal',
+        needsStop: !alreadyStopped,
+        onProgress: (text) => notice('ok', text),
+        onStopped: () => saveUserStrategy({ ...record, status: 'stopped' }),
+        onStep: (method, hash) => {
+          saveUserTx(owner, {
+            hash,
+            type: method === 'stop' ? 'cancel' : 'withdraw',
+            description: `${
+              method === 'stop' ? 'Stop' : method === 'withdraw' ? 'Withdraw ASE from' : 'Reclaim tokens from'
+            } ${record.templateName ?? record.template} bot`,
+            timestamp: Date.now(),
+            status: 'confirmed',
+            strategyAddress: record.address,
+          });
+        },
       });
-      setBotNotice((prev) => ({ ...prev, [record.address]: { kind: 'ok', text: 'Stop sent · waiting for the receipt…' } }));
-      const receipt = await client.waitReceipt(hash, 120_000);
-      if (!receipt.success) throw new Error('The stop transaction reverted on chain.');
-      saveUserTx(wallet.address, {
-        hash,
-        type: 'cancel',
-        description: `Stop ${record.templateName ?? record.template} bot`,
-        timestamp: Date.now(),
-        status: 'confirmed',
-        strategyAddress: record.address,
-      });
-      saveUserStrategy({ ...record, status: 'stopped' });
-      setBotNotice((prev) => ({ ...prev, [record.address]: { kind: 'ok', text: `Bot stopped · ${hash.slice(0, 12)}…` } }));
+      const parts = [result.stopped ? 'Bot stopped' : 'Funds withdrawn'];
+      if (result.aseWithdrawn > 0n) parts.push(`${fmtWei(result.aseWithdrawn, 3)} ASE returned`);
+      if (!result.stopped && result.aseWithdrawn === 0n && result.tokenReclaimed === 0n) {
+        parts.push('nothing left to withdraw');
+      }
+      notice('ok', parts.join(' · '));
       liveStrategies.refresh();
       void refreshHoldings();
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
       const text = /reject|denied|cancel|declin/i.test(raw)
-        ? 'The wallet rejected the transaction. The bot keeps running.'
-        : raw;
-      setBotNotice((prev) => ({ ...prev, [record.address]: { kind: 'err', text } }));
+        ? 'The wallet rejected the transaction. Nothing was changed.'
+        : /unexpected token|not valid json|<html/i.test(raw)
+          ? 'The Asentum node returned a temporary error page instead of a transaction result. Nothing was changed — wait a few seconds and press the button again.'
+          : raw;
+      notice('err', text);
     } finally {
       setStopping(null);
     }
@@ -208,7 +264,7 @@ export function Portfolio() {
       } else {
         const pool = allPools.find((item) => item.id === holding.poolId && item.token.toLowerCase() === holding.token.toLowerCase())
           ?? allPools.find((item) => item.token.toLowerCase() === holding.token.toLowerCase());
-        valueAse = pool ? holding.balanceNum * Number(weiToAse(pool.spot, 6)) : 0;
+        valueAse = sellValueAse(pool, holding.balanceRaw) ?? 0;
       }
       return { holding, valueAse };
     });
@@ -305,19 +361,20 @@ export function Portfolio() {
           return (
             <div className="pf-value">
               <div>
-                <span className="label">Estimated portfolio value</span>
+                <span className="label">Wallet value if sold now</span>
                 <strong>
                   {totalValue > 0 ? `${totalValue.toLocaleString('en-US', { maximumFractionDigits: 2 })} ASE` : '—'}
                 </strong>
                 <small>
-                  Wallet balances at the current AMM spot plus ASE held by your contracts. Token inventory still
-                  inside a contract is not marked to market here.
+                  Full-size AMM quote for every token balance — what the pool would actually pay after price
+                  impact and fees — plus ASE held by your contracts. Spot price × quantity is not used, because a
+                  large balance in a shallow pool is worth much less than its spot mark.
                 </small>
               </div>
               <div className="pf-value-side">
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
                   <span className="label">Deployed</span>
-                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-2)' }}>
+                  <span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>
                     {deployedPct.toFixed(1)}%
                   </span>
                 </div>
@@ -365,9 +422,9 @@ export function Portfolio() {
         {holdings.length > 0 && allocation.total > 0 && (
           <div className="alloc" style={{ marginTop: 18 }}>
             <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 16 }}>
-              <span className="label">Estimated allocation</span>
-              <span className="mono" style={{ fontSize: 11, color: 'var(--dim)' }}>
-                {allocation.total.toLocaleString('en-US', { maximumFractionDigits: 2 })} ASE at current pool spot
+              <span className="label">Value by asset · if sold now</span>
+              <span className="mono" style={{ fontSize: 13, color: 'var(--dim)' }}>
+                {allocation.total.toLocaleString('en-US', { maximumFractionDigits: 2 })} ASE after price impact
               </span>
             </div>
             <div className="alloc-bar">
@@ -431,7 +488,7 @@ export function Portfolio() {
                     <div className="skeleton" key={row} style={{ height: 38 }} />
                   ))}
                 </div>
-                <p className="muted" style={{ fontSize: 12, marginTop: 12 }}>Scanning wallet balances on Asentum…</p>
+                <p className="muted" style={{ fontSize: 13.5, marginTop: 12 }}>Scanning wallet balances on Asentum…</p>
               </div>
             ) : holdings.length === 0 ? (
               <div className="panel-body">
@@ -455,7 +512,7 @@ export function Portfolio() {
                     <tr>
                       <th>Asset</th>
                       <th>Balance</th>
-                      <th>Est. value</th>
+                      <th>Value if sold</th>
                       <th>Venue</th>
                       <th style={{ textAlign: 'right' }}>Action</th>
                     </tr>
@@ -464,7 +521,7 @@ export function Portfolio() {
                     {nativeHolding && (
                       <tr>
                         <td>
-                          <strong>ASE</strong> <span className="muted" style={{ fontSize: 11.5 }}>· native</span>
+                          <strong>ASE</strong> <span className="muted" style={{ fontSize: 13 }}>· native</span>
                         </td>
                         <td className="mono"><strong>{nativeHolding.balanceFmt} ASE</strong></td>
                         <td className="mono">{nativeHolding.balanceFmt} ASE</td>
@@ -479,12 +536,12 @@ export function Portfolio() {
                     {tokenHoldings.map((token) => {
                       const pool = allPools.find((item) => item.id === token.poolId)
                         ?? allPools.find((item) => item.token.toLowerCase() === token.token.toLowerCase());
-                      const estimated = pool ? token.balanceNum * Number(weiToAse(pool.spot, 6)) : null;
+                      const estimated = sellValueAse(pool, token.balanceRaw);
                       return (
                         <tr key={token.token}>
                           <td>
                             <strong>{token.symbol}</strong>
-                            <a href={explorerAddressUrl(token.token)} target="_blank" rel="noreferrer" className="muted mono" style={{ fontSize: 10.5, marginLeft: 8 }}>
+                            <a href={explorerAddressUrl(token.token)} target="_blank" rel="noreferrer" className="muted mono" style={{ fontSize: 13, marginLeft: 8 }}>
                               {shortAddr(token.token)}
                             </a>
                           </td>
@@ -522,7 +579,7 @@ export function Portfolio() {
               <div>
                 <span className="label">My bots</span>
                 <p className="muted" style={{ marginTop: 4 }}>
-                  Open a bot to stop it, withdraw ASE or reclaim unsold tokens.
+                  Close a bot to cancel its schedule and send the ASE and tokens back to your wallet. Your wallet will ask you to approve each transfer.
                 </p>
               </div>
               <Link to="/deploy" className="btn btn-ghost btn-sm">
@@ -617,11 +674,22 @@ export function Portfolio() {
 
                         {strategy.status === 'deployed' && (
                           <div className="notice" style={{ borderLeftColor: 'var(--warn)', background: 'var(--warn-soft)' }}>
-                            <strong style={{ color: 'var(--warn)' }}>Setup incomplete (unarmed)</strong>
-                            <span>The contract is on-chain but its schedule was not started.</span>
-                            <Link to={`/strategies/${strategy.address}`} className="link-arrow" style={{ marginTop: 6 }}>
-                              Finish setup & arm bot →
+                            <strong style={{ color: 'var(--warn)' }}>Setup was never finished</strong>
+                            <span>This contract has no owner on chain, so it holds no funds and will not run.</span>
+                            <Link to={`/deploy?template=${strategy.template}`} className="link-arrow" style={{ marginTop: 6 }}>
+                              Start a new bot →
                             </Link>
+                          </div>
+                        )}
+
+                        {strategy.status !== 'deployed'
+                          && strategy.status !== 'stopped'
+                          && liveMatch
+                          && liveMatch.stopped !== true
+                          && liveMatch.cron === null && (
+                          <div className="notice" style={{ borderLeftColor: 'var(--warn)', background: 'var(--warn-soft)' }}>
+                            <strong style={{ color: 'var(--warn)' }}>Schedule ended</strong>
+                            <span>Its cron gas escrow was used up, so it will not trade again. Close it to return what is left.</span>
                           </div>
                         )}
 
@@ -636,22 +704,43 @@ export function Portfolio() {
                         )}
 
                         <div className="bot-actions">
-                          <Link to={`/strategies/${strategy.address}`} className="btn btn-primary">
-                            Manage bot
-                          </Link>
-                          {liveMatch?.stopped !== true && strategy.status !== 'failed' && (
-                            <button
-                              type="button"
-                              className="btn btn-ghost"
-                              disabled={stopping === strategy.address}
-                              onClick={() => void stopBot(strategy)}
-                            >
-                              {stopping === strategy.address ? 'Stopping…' : 'Stop bot'}
-                            </button>
+                          {strategy.status === 'deployed' ? (
+                            <>
+                              <Link to={`/deploy?template=${strategy.template}`} className="btn btn-primary">
+                                Start a new bot
+                              </Link>
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                onClick={() => removeUnfinished(strategy)}
+                              >
+                                Remove
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <Link to={`/strategies/${strategy.address}`} className="btn btn-primary">
+                                Manage bot
+                              </Link>
+                              {strategy.status !== 'failed' && (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={stopping === strategy.address}
+                                  onClick={() => void closeBotRecord(
+                                    strategy,
+                                    liveMatch?.stopped === true || strategy.status === 'stopped',
+                                  )}
+                                >
+                                  {stopping === strategy.address
+                                    ? 'Closing…'
+                                    : liveMatch?.stopped === true || strategy.status === 'stopped'
+                                      ? 'Withdraw funds'
+                                      : 'Close bot'}
+                                </button>
+                              )}
+                            </>
                           )}
-                          <Link to={`/strategies/${strategy.address}`} className="btn btn-ghost">
-                            Withdraw
-                          </Link>
                           <a className="btn btn-ghost" href={explorerAddressUrl(strategy.address)} target="_blank" rel="noreferrer" style={{ flex: '0 0 auto', padding: '0 10px' }}>
                             ↗
                           </a>
@@ -703,11 +792,11 @@ export function Portfolio() {
                   <tbody>
                     {userTxs.map((tx) => (
                       <tr key={tx.hash}>
-                        <td className="mono dim" style={{ fontSize: 11 }}>
+                        <td className="mono dim" style={{ fontSize: 13 }}>
                           {new Date(tx.timestamp).toLocaleString('en-US', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
                         </td>
                         <td><strong>{tx.description}</strong></td>
-                        <td className="mono" style={{ fontSize: 11 }}>
+                        <td className="mono" style={{ fontSize: 13 }}>
                           <a href={explorerTxUrl(tx.hash)} target="_blank" rel="noreferrer" className="wallet-link">
                             {shortAddr(tx.hash)} ↗
                           </a>
@@ -717,7 +806,7 @@ export function Portfolio() {
                             {tx.status}
                           </span>
                         </td>
-                        <td className="mono" style={{ fontSize: 11 }}>
+                        <td className="mono" style={{ fontSize: 13 }}>
                           {tx.strategyAddress ? (
                             <Link to={`/strategies/${tx.strategyAddress}`} className="wallet-link">
                               {shortAddr(tx.strategyAddress)}
@@ -734,6 +823,8 @@ export function Portfolio() {
             )}
           </div>
         )}
+
+        <WalletRegistryPanel />
       </section>
     </>
   );

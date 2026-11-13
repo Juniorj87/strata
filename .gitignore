@@ -61,3 +61,7 @@ scripts/test-*.mjs
 scripts/bench-*.mjs
 scripts/step-by-step.mjs
 scripts/get-asedex-source.mjs
+
+# Local unpack staging and full backups (never commit)
+.staging-new/
+backups/

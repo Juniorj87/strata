@@ -1,0 +1,8 @@
+backups/
+new version/
+*.zip
+dist/
+node_modules/
+.strata/
+.env*
+.vercel/

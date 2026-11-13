@@ -49,7 +49,7 @@ export function StrategyCard({ strategy }: { strategy: LiveStrategy }) {
       </div>
 
       <div className="card-foot">
-        <span className="mono" style={{ fontSize: 10.5 }}>
+        <span className="mono" style={{ fontSize: 12 }}>
           {countdown
             ? `next run in ${countdown}`
             : strategy.intervalSec

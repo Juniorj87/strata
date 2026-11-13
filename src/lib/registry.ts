@@ -1,5 +1,6 @@
 import {
   AURAS,
+  AURAS_AMM_ALL,
   ASEDEX_AMM,
   fetchAseDexPools,
   fetchPools,
@@ -135,7 +136,11 @@ interface AccountingResult {
   receiptsResolved: boolean;
 }
 
-const AMM_ADDRESSES = new Set([AURAS.toLowerCase(), ASEDEX_AMM.toLowerCase()]);
+// Both Auras deployments count: bots armed before v2 traded against v1.
+const AMM_ADDRESSES = new Set([
+  ...AURAS_AMM_ALL.map((amm) => amm.toLowerCase()),
+  ASEDEX_AMM.toLowerCase(),
+]);
 
 /**
  * Indexed accounting for one strategy contract.

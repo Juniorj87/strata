@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
 import { loadStrategy, type LiveStrategy } from '../lib/registry';
@@ -9,7 +9,8 @@ import { CodeBlock } from '../components/CodeBlock';
 import { MARKETPLACE_ADDRESS } from '../lib/marketplace';
 import { StrategyPnlPanel } from '../components/StrategyPnlPanel';
 import { botTypeFor } from '../lib/templates';
-import { getUserStrategies, saveUserStrategy, saveUserTx } from '../lib/userStrategies';
+import { closeBot } from '../lib/botLifecycle';
+import { getUserStrategies, removeUserStrategy, saveUserStrategy, saveUserTx } from '../lib/userStrategies';
 
 function nextRunLabel(cron: { nextRunAt: string } | null): string {
   if (!cron?.nextRunAt) return 'not scheduled';
@@ -63,6 +64,7 @@ function buildFills(strategy: LiveStrategy): FillRow[] {
 
 export function StrategyDetail() {
   const { address = '' } = useParams();
+  const navigate = useNavigate();
   const wallet = useWallet();
   const client = useAsentum();
   const [actionBusy, setActionBusy] = useState(false);
@@ -121,54 +123,63 @@ export function StrategyDetail() {
     }
   };
 
-  const runOwnerAction = async (method: 'stop' | 'withdraw' | 'withdrawTokens') => {
+  const removeUnfinished = () => {
+    if (!localMatch || !wallet.address) return;
+    removeUserStrategy(localMatch.address, wallet.address);
+    navigate('/portfolio');
+  };
+
+  const runOwnerAction = async (mode: 'close' | 'withdraw') => {
     const recipient = userAse1 || userHex;
     if (!walletIsOwner || !recipient) return;
     setActionBusy(true);
     setActionMessage('');
     setActionError('');
     try {
-      let args: string[] = [];
-      if (method === 'withdraw') {
-        const amount = BigInt(strategy?.balanceAse || '0');
-        if (amount <= 0n) throw new Error('The bot contract has no ASE balance to withdraw.');
-        args = [recipient, amount.toString()];
-      } else if (method === 'withdrawTokens') {
-        args = [recipient];
+      const result = await closeBot({
+        client,
+        contract: strategy?.ase1 || strategy?.address || address,
+        balanceAddress: strategy?.address || address,
+        recipient,
+        token: strategy?.token ?? null,
+        // Older signal contracts shipped without withdrawTokens. New source
+        // has the method, so decide from the deployed source, not the template.
+        supportsTokenWithdraw: strategy?.template !== 'momentum-signal'
+          || Boolean(strategy?.source?.includes('withdrawTokens')),
+        needsStop: mode === 'close',
+        onProgress: setActionMessage,
+        onStopped: () => {
+          if (!wallet.address || !strategy) return;
+          const record = getUserStrategies(wallet.address).find(
+            (item) => item.address.toLowerCase() === strategy.address.toLowerCase(),
+          );
+          if (record) saveUserStrategy({ ...record, status: 'stopped' });
+        },
+        onStep: (method, hash) => {
+          if (!wallet.address) return;
+          saveUserTx(wallet.address, {
+            hash,
+            type: method === 'stop' ? 'cancel' : 'withdraw',
+            description: `${
+              method === 'stop' ? 'Stop' : method === 'withdraw' ? 'Withdraw ASE from' : 'Reclaim tokens from'
+            } ${strategy?.name ?? 'bot'}`,
+            timestamp: Date.now(),
+            status: 'confirmed',
+            strategyAddress: strategy?.address ?? address,
+          });
+        },
+      });
+      const parts = [result.stopped ? 'Bot stopped' : 'Funds withdrawn'];
+      if (result.aseWithdrawn > 0n) parts.push(`${fmtWei(result.aseWithdrawn, 3)} ASE returned`);
+      if (result.tokenReclaimed > 0n && strategy?.tokenDecimals != null) {
+        parts.push(`${formatToken(result.tokenReclaimed, strategy.tokenDecimals, strategy?.symbol ?? 'tokens')} returned`);
       }
-      const target = strategy?.ase1 || strategy?.address || address;
-      const txHash = await client.call(target, method, args);
-      if (wallet.address && method === 'stop') {
-        saveUserTx(wallet.address, {
-          hash: txHash,
-          type: 'cancel',
-          description: `Stop ${strategy?.name ?? 'bot'}`,
-          timestamp: Date.now(),
-          status: 'pending',
-          strategyAddress: strategy?.address ?? address,
-        });
+      if (!result.stopped && result.aseWithdrawn === 0n && result.tokenReclaimed === 0n) {
+        parts.push('nothing left to withdraw');
       }
-      const receipt = await client.waitReceipt(txHash, 120000);
-      if (!receipt.success) throw new Error(`${method} transaction reverted. Open the transaction in the explorer for details.`);
-      if (method === 'stop' && wallet.address && strategy) {
-        const record = getUserStrategies(wallet.address).find(
-          (item) => item.address.toLowerCase() === strategy.address.toLowerCase(),
-        );
-        if (record) saveUserStrategy({ ...record, status: 'stopped' });
-        saveUserTx(wallet.address, {
-          hash: txHash,
-          type: 'cancel',
-          description: `Stop ${strategy.name}`,
-          timestamp: Date.now(),
-          status: 'confirmed',
-          strategyAddress: strategy.address,
-        });
-      }
-      setActionMessage(
-        `${method === 'stop' ? 'Bot stopped' : method === 'withdraw' ? 'ASE withdrawn' : 'Tokens reclaimed'} · ${txHash.slice(0, 12)}…`,
-      );
+      setActionMessage(parts.join(' · '));
       refresh();
-      if (method === 'stop') {
+      if (result.stopped) {
         // The node can lag one block; keep re-reading until the contract
         // reports stopped instead of leaving the badge on "Active".
         for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -223,20 +234,42 @@ export function StrategyDetail() {
   // A confirmed stop is stored locally as well: if the status read lags or
   // the node rate-limits it, the page must not keep showing the bot as active.
   const knownStopped = strategy.stopped === true || localMatch?.status === 'stopped';
+  // A deployed-but-uninitialised contract has no owner, so stop() reverts.
+  const notArmed = localMatch?.status === 'deployed';
   const running = !knownStopped && strategy.cron !== null;
-  const statusLabel = knownStopped ? 'Stopped' : running ? 'Active & Trading' : 'Idle / Unarmed';
+  const statusLabel = knownStopped
+    ? 'Stopped'
+    : running
+      ? 'Active & Trading'
+      : notArmed
+        ? 'Not armed'
+        : 'Schedule ended';
   const statusClass = knownStopped ? 'status-badge off' : running ? 'status-badge live' : 'status-badge pending';
   const fills = buildFills(strategy);
-  const canWithdrawAse = BigInt(strategy.balanceAse || '0') > 0n
-    && !((strategy.template === 'grid' || strategy.template === 'dca') && !knownStopped);
+  const needsStop = !knownStopped;
+  const canReclaimTokens = strategy.template !== 'momentum-signal' || strategy.source.includes('withdrawTokens');
+  const hasBalance = BigInt(strategy.balanceAse || '0') > 0n
+    || (strategy.token !== null
+      && canReclaimTokens
+      && BigInt(strategy.tokenBalance || '0') > 0n);
 
   return (
     <>
       <section className="wrap detail-head">
-        <span className="label">
-          {bot ? `${bot.title} bot` : `${strategy.template} contract`}
-        </span>
+        <Link className="link-arrow" to="/portfolio" style={{ display: 'inline-block', marginBottom: 10 }}>
+          ← My bots
+        </Link>
+        <div>
+          <span className="label">
+            {bot ? `${bot.title} bot` : `${strategy.template} contract`}
+          </span>
+        </div>
         <h1 className="detail-title">{strategy.name}</h1>
+        <p className="section-note" style={{ maxWidth: 720, marginTop: 12 }}>
+          {notArmed
+            ? 'This contract was deployed but never armed: it has no owner on chain, holds no funds and will never run. Remove the entry and create a new bot.'
+            : 'This is your bot\'s management page: live status, balances, trade history and contract details. Nothing here needs configuring — the bot runs on-chain on its schedule. To stop it and send everything back to your wallet, use Close bot & return funds.'}
+        </p>
         <div className="detail-meta">
           <span className={statusClass}>{statusLabel}</span>
           <span>{strategy.symbol ? `${strategy.symbol} / ASE` : 'pair unavailable'}</span>
@@ -249,49 +282,47 @@ export function StrategyDetail() {
         </div>
 
         {walletIsOwner ? (
-          <div className="manage-bar">
-            <button
-              className="btn btn-ghost"
-              style={{ borderColor: knownStopped ? undefined : 'var(--down)', color: knownStopped ? undefined : 'var(--down)' }}
-              type="button"
-              disabled={actionBusy || knownStopped}
-              onClick={() => runOwnerAction('stop')}
-            >
-              {actionBusy ? 'Working…' : 'Stop bot'}
-            </button>
-            <button
-              className={canWithdrawAse ? 'btn btn-primary' : 'btn btn-ghost'}
-              type="button"
-              disabled={actionBusy || !canWithdrawAse}
-              onClick={() => runOwnerAction('withdraw')}
-            >
-              Withdraw ASE
-            </button>
-            {strategy.token && strategy.template !== 'momentum-signal' && (
+          notArmed ? (
+            <div className="manage-bar">
+              <Link className="btn btn-primary" to={`/deploy?template=${strategy.template}`}>
+                Start a new bot
+              </Link>
+              {localMatch && (
+                <button type="button" className="btn btn-ghost" onClick={removeUnfinished}>
+                  Remove unfinished entry
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="manage-bar">
               <button
-                className={knownStopped ? 'btn btn-primary' : 'btn btn-ghost'}
+                className="btn btn-primary"
                 type="button"
-                disabled={actionBusy || !knownStopped}
-                onClick={() => runOwnerAction('withdrawTokens')}
+                disabled={actionBusy || (!needsStop && !hasBalance)}
+                onClick={() => void runOwnerAction(needsStop ? 'close' : 'withdraw')}
               >
-                Reclaim tokens
+                {actionBusy ? 'Closing…' : needsStop ? 'Close bot & return funds' : hasBalance ? 'Withdraw everything' : 'Nothing to withdraw'}
               </button>
-            )}
-          </div>
+            </div>
+          )
         ) : (
           <div className="manage-bar">
             <Link className="btn btn-primary" to={`/deploy?template=${strategy.template}`}>Deploy a bot like this</Link>
           </div>
         )}
 
-        {walletIsOwner && (
+        {walletIsOwner && !notArmed && (
           <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
             {knownStopped
-              ? 'The schedule is cancelled. Any ASE and tokens left in the contract can be withdrawn.'
-              : canWithdrawAse
-                ? 'Stop the bot before withdrawing if it still has scheduled runs; unused gas escrow returns to the contract.'
-                : 'Stop the bot first to withdraw ASE from a grid or DCA contract, so its reserved buy budget cannot be drained mid-run.'}
+              ? 'The schedule is cancelled. Everything left in the contract goes back to your wallet in one action.'
+              : 'Closing cancels the schedule, refunds unused gas escrow, then sends the remaining ASE and unsold tokens to your wallet. Your wallet asks you to approve each prompt — no seed phrase or private key is needed.'}
           </p>
+        )}
+        {!notArmed && !knownStopped && !strategy.cron && (
+          <div className="notice" style={{ borderLeftColor: 'var(--warn)', background: 'var(--warn-soft)', marginTop: 12, maxWidth: 720 }}>
+            <strong style={{ color: 'var(--warn)' }}>Schedule ended</strong>
+            <span>This bot&apos;s cron gas escrow ran out, so the chain will not call it again. Close it to return what is left, then create a new bot.</span>
+          </div>
         )}
         {actionMessage && <p className="muted" role="status" style={{ marginTop: 10 }}>{actionMessage}</p>}
         {actionError && <div className="notice deploy-error" role="alert" style={{ marginTop: 10, maxWidth: 720 }}>{actionError}</div>}
@@ -334,7 +365,13 @@ export function StrategyDetail() {
           <div className="metric">
             <div className="metric-label">Schedule status</div>
             <div className="metric-value" style={{ fontSize: 16 }}>
-              {strategy.cron?.runsLeft ? `${strategy.cron.runsLeft} runs left` : knownStopped ? 'Stopped' : 'Continuous'}
+              {notArmed
+                ? 'Not scheduled'
+                : strategy.cron?.runsLeft
+                  ? `${strategy.cron.runsLeft} runs left`
+                  : knownStopped
+                    ? 'Stopped'
+                    : 'Schedule ended'}
             </div>
           </div>
         </div>
@@ -428,13 +465,13 @@ export function StrategyDetail() {
                     <span className="dim">#{event.block.toLocaleString('en-US')}</span>
                     <span>
                       {event.name}
-                      <span className="dim" style={{ display: 'block', fontSize: 11 }}>
+                      <span className="dim" style={{ display: 'block', fontSize: 13 }}>
                         {Object.entries(event.args)
                           .filter(([key]) => key !== 'poolId')
                           .map(([key, value]) => `${key}=${String(value).slice(0, 28)}`)
                           .join('  ')}
                       </span>
-                      <a className="dim" style={{ display: 'block', fontSize: 11 }} href={explorerTxUrl(event.txHash)} target="_blank" rel="noreferrer">
+                      <a className="dim" style={{ display: 'block', fontSize: 13 }} href={explorerTxUrl(event.txHash)} target="_blank" rel="noreferrer">
                         {shortHash(event.txHash)} ↗
                       </a>
                     </span>

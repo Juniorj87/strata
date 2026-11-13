@@ -1,87 +1,40 @@
-# Known Issues and Bugs
+# Known Issues and Verification Notes
 
-This document tracks known issues and bugs in the Strata project.
+Last reviewed: 2026-11-13
 
-## 🐛 Current Issues
+This file records limitations that are visible from the current source tree. A feature being present in source is not proof that a live transaction has succeeded.
 
-### Deployment Scripts
+## Known product limitations
 
-#### Issue: Seed File in Git-ignored Directory
-- **Status:** Documented behavior
-- **Description:** The deployer generates a deterministic-seed wallet stored in `.strata/seed.json`, which is git-ignored. This is intentional for security reasons.
-- **Impact:** Users must manually fund the generated wallet address before deployment.
-- **Workaround:** Follow the deployment steps in README.md to fund the wallet after address generation.
+### Perpetual futures are not connected
+- **Status:** Not implemented / waiting for a public provider.
+- **Description:** `src/lib/perps.ts` exposes an adapter boundary only. No public AsePad contract address, ABI or API is configured in this project.
+- **Impact:** Long/short, leverage, margin, funding, liquidation and perp position management are unavailable.
+- **Expected behaviour:** The UI must keep the provider status explicit and must not derive perp prices or positions from spot AMM data.
 
-### Contract Templates
+### Order-book trading is not available
+- **Status:** Not implemented as an order book.
+- **Description:** Advanced Trading supports AMM market swaps and supported escrowed Auras v2 limit orders. The latter are evaluated against AMM liquidity and do not use a matching engine.
+- **Impact:** Do not describe the order list as a central limit order book or claim maker/taker matching.
 
-#### Issue: Placeholder Addresses
-- **Status:** Pending
-- **Description:** Contract templates use placeholder constants (`BASE`, `POOL_TOKEN`, `QUOTE_TOKEN`) that must be replaced with real token addresses before deployment.
-- **Impact:** Direct deployment without address replacement will fail.
-- **Workaround:** Manually replace placeholder addresses in contract files before deployment.
-- **Proposed Fix:** Add automated address replacement in deploy scripts.
+### Scalping / sub-minute execution
+- **Status:** Not supported by native Cron.
+- **Description:** The official Asentum scheduled-calls guide documents a minimum recurring interval of 60,000 ms.
+- **Impact:** 1m candles are supported, but they do not provide sub-minute execution or guaranteed execution at every candle boundary.
 
-#### Issue: Templates Not Deployed
-- **Status:** Documented limitation
-- **Description:** Templates have not been deployed to live chain yet. They are written against documented VM globals but not exercised against a live node.
-- **Impact:** Cannot verify actual on-chain behavior until live deployment.
-- **Workaround:** Use testnet for initial deployment and testing.
+### Market data depends on the public indexer
+- **Status:** External read dependency.
+- **Description:** Advanced Trading uses the Auras public indexer for pairs, candles and recent fills.
+- **Impact:** If the indexer is unavailable or incomplete, market data may be delayed or absent. The UI must show that state and must not fabricate missing data.
 
-### Web Application
+## Environment verification still required
 
-#### Issue: Chain RPC Health Check
-- **Status:** Working as intended
-- **Description:** `npm run chain:check` performs sanity checks on RPC surfaces but requires active blockchain connection.
-- **Impact:** Fails if blockchain RPC is unavailable.
-- **Workaround:** Ensure blockchain RPC is accessible before running check.
+- Run `npm ci`, `npm run typecheck`, `npm run lint` and `npm run build` in an environment with npm registry access.
+- Run `npm run test:strategies` and `npm run test:trading`.
+- Run read-only Asentum chain checks.
+- Test wallet connection, quote refresh, market swap, Auras v2 limit-order post/cancel, strategy deployment/stop/withdraw and ARC-20 deploy/init/verification on testnet.
+- Do not run real wallet-funded transactions without the wallet owner's explicit approval.
 
-## 🔧 Fixed Issues
+## Historical notes
 
-*No fixed issues to report at this time.*
-
-## 📋 Feature Requests
-
-### Deployment Automation
-- Add support for automatic address replacement in deploy scripts
-- Add dry-run mode for deployment testing
-- Add strategy validation before deployment
-
-### Web Application
-- Add strategy performance dashboard
-- Add strategy comparison tools
-- Add strategy backtesting features
-
-### Documentation
-- Add video tutorials for strategy deployment
-- Add more detailed examples for each template
-- Add troubleshooting guide
-
-## 📝 Reporting New Issues
-
-To report a new issue:
-
-1. Check if the issue is already listed
-2. Search existing GitHub issues
-3. Create a new issue with:
-   - Clear title
-   - Detailed description
-   - Steps to reproduce
-   - Expected vs actual behavior
-   - Environment details
-   - Screenshots/logs if applicable
-
-## 🔍 Issue Triage
-
-Labels used to categorize issues:
-- `bug` - Confirmed bug
-- `enhancement` - Feature request
-- `documentation` - Documentation issue
-- `good first issue` - Good for new contributors
-- `help wanted` - Community help needed
-- `priority: high` - Urgent issue
-- `priority: medium` - Normal priority
-- `priority: low` - Nice to have
-
----
-
-Last updated: 2026-10-23
+Older issue descriptions claiming that strategy templates were not wired to the app, that a backend wallet database existed, or that a mean-reversion template was part of the current eight-template catalog are not current product specifications. Check `src/lib/templates.ts` and `docs/PRODUCT_GUIDE.md` for the supported template list.

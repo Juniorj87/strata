@@ -1,7 +1,7 @@
 // Strata template: TWAP token-to-ASE slicer for Auras AMM and AseDex.
 // init(poolId, token, notionalWei, slices, ammAddress)
 
-const AURAS_AMM = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+const AURAS_AMM = '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
 const ASEDEX_AMM = '0xc3833b73eb30242289e533b3e97c4b72b97e24e9';
 const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 const CRON = '0x0000000000000000000000000000000000000006';

@@ -40,10 +40,10 @@ const STRATEGY_GUIDES: StrategyGuide[] = [
     title: 'Take-Profit Trigger',
     subtitle: 'Automated sell target into ASE',
     summary:
-      'Monitors the AMM pool price on schedule and executes one complete sell order into ASE as soon as your target price (+5%, +10%, +20%) is reached. Once executed, the schedule terminates.',
+      'Checks the AMM pool price on each scheduled run and executes one complete sell order into ASE on the first run where your target price (+5%, +10%, +20%) is met. Once executed, the schedule terminates.',
     whyUse:
       'Locks in a profit target automatically when prices spike, without sitting in front of a screen. It is a scheduled check, not a resting order-book limit.',
-    cadence: 'Checked every 60 seconds',
+    cadence: 'Every run (min 60s; first run ≥5 min)',
     funding: 'Token allocation to sell + cron gas escrow',
     recommendedFor: 'Locking in gains at upper resistance levels',
   },
@@ -56,8 +56,8 @@ const STRATEGY_GUIDES: StrategyGuide[] = [
     summary:
       'Establishes a symmetrical grid of buy and sell price levels around the current price. When the price dips by your step (-2%) it buys with ASE; when it rallies (+2%) it sells tokens for ASE.',
     whyUse:
-      'Generates continuous activity during sideways markets where price oscillates inside a horizontal channel without a clear directional trend.',
-    cadence: 'Continuous across 3 to 10 levels',
+      'Takes repeated small profits during sideways markets where price oscillates inside a horizontal channel without a clear directional trend.',
+    cadence: 'Scheduled checks across 3 to 10 levels',
     funding: 'Tokens for sell levels + separate ASE reserve for buy levels',
     recommendedFor: 'Flat, sideways or oscillating corridors',
   },
@@ -102,6 +102,20 @@ const STRATEGY_GUIDES: StrategyGuide[] = [
     cadence: 'One bounded swap per cron interval',
     funding: 'Token allocation + cron gas escrow',
     recommendedFor: 'Scaling out of runners during sustained rallies',
+  },
+  {
+    id: 'momentum-trader',
+    category: 'analytics',
+    tag: 'Momentum',
+    title: 'Momentum Trader',
+    subtitle: 'One-sided momentum execution into ASE',
+    summary:
+      'Compares consecutive Auras TWAP windows. When upward drift crosses your threshold, it sells a fixed amount of the deposited token into ASE. It does not open a buy position.',
+    whyUse:
+      'Turns a momentum signal into an actual spot sale with a minimum-output guard, without an off-chain bot holding the tokens.',
+    cadence: 'Checks every run (min 60s; first run ≥5 min)',
+    funding: 'Token inventory + cron gas escrow',
+    recommendedFor: 'Selling into strength with a defined size',
   },
   {
     id: 'momentum-signal',
@@ -228,7 +242,7 @@ export function Strategies() {
                     <div>
                       <div className="catalog-card-head">
                         <span className="catalog-tag">{guide.tag}</span>
-                        <span className="mono dim" style={{ fontSize: 10.5 }}>
+                        <span className="mono dim" style={{ fontSize: 13 }}>
                           {matches.length > 0
                             ? `${matches.length} on-chain · ${scheduled.length} scheduled`
                             : 'Verified template'}

@@ -2,7 +2,7 @@
 // A read-only Auras cumulative-TWAP signal strategy.
 // init(poolId, token, thresholdBps, intervalSec, ammAddress)
 
-const AURAS_AMM = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+const AURAS_AMM = '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
 const ASEDEX_AMM = '0xc3833b73eb30242289e533b3e97c4b72b97e24e9';
 const CRON = '0x0000000000000000000000000000000000000006';
 const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
@@ -160,6 +160,17 @@ function tokenCumulative(poolId, token, snapshot) {
     assert(amount > 0n, 'amount must be positive');
     transfer(to || msg.sender, amount);
     emit('Withdrawn', { to: to || msg.sender, amount: amount.toString() });
+    return amount.toString();
+  },
+
+  withdrawTokens(to) {
+    assert(msg.sender === storage.get('owner'), 'not the owner');
+    assert(storage.get('stopped') === 'true', 'stop the strategy first');
+    const token = storage.get('token');
+    const amount = BigInt(E(token).balanceOf(msg.contractAddress));
+    assert(amount > 0n, 'no tokens to withdraw');
+    E(token).transfer(to || msg.sender, amount.toString());
+    emit('TokensWithdrawn', { token, to: to || msg.sender, amount: amount.toString() });
     return amount.toString();
   },
 

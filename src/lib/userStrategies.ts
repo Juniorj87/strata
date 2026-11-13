@@ -85,6 +85,38 @@ export function saveUserStrategy(record: DeployedStrategyRecord): void {
   }
 }
 
+/** Remove a local record, e.g. a contract that was deployed but never armed. */
+export function removeUserStrategy(address: string, ownerAddress?: string): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  const lower = address.toLowerCase();
+  const clean = (key: string) => {
+    try {
+      const list: DeployedStrategyRecord[] = JSON.parse(localStorage.getItem(key) ?? '[]');
+      if (!Array.isArray(list)) return;
+      localStorage.setItem(key, JSON.stringify(list.filter((s) => s.address.toLowerCase() !== lower)));
+    } catch {
+      // ignore unreadable keys
+    }
+  };
+  clean(ALL_STRATEGIES_KEY);
+  if (ownerAddress) {
+    const ownerKey = ownerAddress.toLowerCase();
+    clean(`${STRATEGIES_PREFIX}${ownerKey}`);
+    try {
+      clean(`${STRATEGIES_PREFIX}${toHexAddress(ownerKey).toLowerCase()}`);
+    } catch {
+      // owner was already hexadecimal
+    }
+    return;
+  }
+  const keys: string[] = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(STRATEGIES_PREFIX)) keys.push(key);
+  }
+  keys.forEach(clean);
+}
+
 export function getUserStrategies(ownerAddress?: string): DeployedStrategyRecord[] {
   if (typeof window === 'undefined' || !window.localStorage) return [];
   try {

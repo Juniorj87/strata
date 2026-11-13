@@ -3,7 +3,7 @@
 // price trigger, not a resting order-book limit order. Spot-only, reduce-only.
 // init(poolId, token, budgetWei, sizePerLevelWei, decimals, targetUpsideBps, levels, intervalSec, ammAddress)
 
-const AURAS_AMM = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+const AURAS_AMM = '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
 const ASEDEX_AMM = '0xc3833b73eb30242289e533b3e97c4b72b97e24e9';
 const CRON = '0x0000000000000000000000000000000000000006';
 const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
@@ -102,7 +102,9 @@ function executeLeg(amount, level, ammAddress) {
     storage.set('stopped', 'false');
     emit('StrataDeploy', { owner: msg.sender, template: 'scale', poolId: String(poolId), intervalSec: interval.toString(), gasEscrowWei: msg.value.toString(), timestamp: chain.blockTimestamp.toString() });
     const intervalMs = interval * 1000n;
-    const jobId = E(CRON, { value: msg.value }).schedule(msg.contractAddress, 'tick', [], (chain.blockTimestamp + intervalMs).toString(), intervalMs.toString(), '0', '800000');
+    // Leave time to deposit the token allocation before the first inventory check.
+    const firstRunMs = intervalMs > 300000n ? intervalMs : 300000n;
+    const jobId = E(CRON, { value: msg.value }).schedule(msg.contractAddress, 'tick', [], (chain.blockTimestamp + firstRunMs).toString(), intervalMs.toString(), '0', '800000');
     storage.set('jobId', String(jobId));
     emit('Armed', { poolId: String(poolId), token: String(token), levels: count.toString(), intervalSec: interval.toString(), startPriceAseWei: startPrice.toString(), targetPriceAseWei: targetPrice.toString(), jobId: String(jobId) });
     return String(jobId);
