@@ -81,23 +81,23 @@ function NavIcon({ name }: { name: string }) {
   }
 }
 
-// Analytics, Leaderboard and Activity are three tabs of one Explore view;
-// keeping all three in the top bar duplicated the same switch twice.
+// One destination per job. The fills ledger is reachable from the leaderboard
+// instead of taking a top-bar slot.
 const nav = [
   { to: '/swap', label: 'Swap', icon: 'swap' },
   { to: '/advanced', label: 'Advanced', icon: 'advanced' },
-  { to: '/strategies', label: 'Strategies', icon: 'strategies' },
+  { to: '/strategies', label: 'Bots', icon: 'strategies' },
   { to: '/portfolio', label: 'Portfolio', icon: 'portfolio' },
-  { to: '/activity', label: 'Activity', icon: 'activity' },
+  { to: '/leaderboard', label: 'Leaderboard', icon: 'leaderboard' },
 ];
 
 const REPO = 'https://github.com/Juniorj87/strata';
 
-const EXPLORE_PATHS = new Set(['/analytics', '/leaderboard', '/activity']);
+const EXPLORE_PATHS = new Set(['/leaderboard', '/activity', '/analytics']);
 
-/** Explore covers its three tabs, so it stays highlighted on any of them. */
+/** The leaderboard tab also covers its fills ledger and the analytics redirect. */
 function isNavActive(to: string, path: string, isActive: boolean): boolean {
-  return isActive || (to === '/analytics' && EXPLORE_PATHS.has(path));
+  return isActive || (to === '/leaderboard' && EXPLORE_PATHS.has(path));
 }
 
 function GitHubIcon() {
@@ -308,10 +308,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
 
             <div className="footer-col">
               <span className="label">Explore</span>
-              <Link to="/analytics">Overview</Link>
               <Link to="/leaderboard">Wallet leaderboard</Link>
+              <Link to="/activity">Fills ledger</Link>
+              <Link to="/advanced">Advanced trading</Link>
               <Link to="/how">Documentation</Link>
-              <Link to="/deploy?mode=pro">Pro mode</Link>
             </div>
 
             <div className="footer-col">

@@ -287,16 +287,15 @@ export function Strategies() {
                         )}
                       </div>
 
-                      <Link
-                        to={
-                          guide.id === 'momentum-signal'
-                            ? '/deploy?template=momentum-signal&mode=pro'
-                            : `/deploy?template=${guide.id}`
-                        }
-                        className="btn btn-ghost"
-                      >
-                        Use this template <span className="arr" aria-hidden="true">→</span>
-                      </Link>
+                      {['momentum-signal', 'momentum-trader', 'scale'].includes(guide.id) ? (
+                        <span className="muted" style={{ fontSize: 13, lineHeight: 1.6 }}>
+                          Advanced template · deployed from the CLI, not the simple builder
+                        </span>
+                      ) : (
+                        <Link to={`/deploy?template=${guide.id}`} className="btn btn-ghost">
+                          Use this template <span className="arr" aria-hidden="true">→</span>
+                        </Link>
+                      )}
                     </div>
                   </article>
                 );

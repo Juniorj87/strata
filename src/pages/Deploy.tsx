@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
 import { loadPools, loadAseDexPools } from '../lib/registry';
-import { BOT_TYPES, TEMPLATES, templateById } from '../lib/templates';
+import { BOT_TYPES, templateById } from '../lib/templates';
 import { shortAddr, weiToAse } from '../lib/format';
 import { WalletPanel } from '../components/WalletPanel';
 import {
@@ -56,7 +56,7 @@ const CONTRACT_SOURCES: Record<string, string> = {
 };
 
 /** How long the wallet may sit on a prompt before the launch gives up. */
-const WALLET_PROMPT_TIMEOUT_MS = 90_000;
+const WALLET_PROMPT_TIMEOUT_MS = 180_000;
 
 /**
  * A wallet that never answers leaves the modal spinning forever. Race the
@@ -66,7 +66,7 @@ function withWalletTimeout<T>(action: Promise<T>, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => {
       reject(new Error(
-        `${label}: the wallet did not answer within 90 seconds. Open the Asentum wallet (extension or Telegram), ` +
+        `${label}: the wallet did not answer within ${WALLET_PROMPT_TIMEOUT_MS / 1000} seconds. Open the Asentum wallet (extension or Telegram), ` +
         'approve or reject the pending request, then try again. If the wallet confirms it later, check Portfolio before retrying.',
       ));
     }, WALLET_PROMPT_TIMEOUT_MS);
@@ -143,9 +143,13 @@ function initArgsFor(
 export function Deploy() {
   const [params, setSearchParams] = useSearchParams();
   const initialTokenHandledRef = useRef(false);
-  const initialMode = params.get('mode') === 'pro' ? 'pro' : 'lite';
-  const initialTemplate = templateById(params.get('template') || (initialMode === 'pro' ? 'momentum-signal' : 'dca'));
-  const [mode, setMode] = useState<'lite' | 'pro'>(initialMode);
+  // There is one builder now. Old links that still say ?mode=pro land on the
+  // simple flow, and a pro-only template falls back to DCA instead of opening
+  // a half-configured screen.
+  const requestedTemplate = templateById(params.get('template') || 'dca');
+  const initialTemplate = BOT_TYPES.some((bot) => bot.templateId === requestedTemplate.id)
+    ? requestedTemplate
+    : templateById('dca');
   const [templateId, setTemplateId] = useState(initialTemplate.id);
   const [poolId, setPoolId] = useState(params.get('pool') ?? '1');
   const [threshold, setThreshold] = useState(params.get('threshold') ?? '120');
@@ -154,20 +158,21 @@ export function Deploy() {
   const [buySizeAse, setBuySizeAse] = useState(params.get('buySizeAse') ?? '10');
   const [buyBudgetAse, setBuyBudgetAse] = useState(params.get('buyBudgetAse') ?? '100');
   const [interval, setInterval] = useState(Number(params.get('interval') ?? initialTemplate.intervalSec));
-  const chartTfFromUrl = params.get('chartTf') ?? '';
-  const chartTfLabel = ({ '1m': '1 minute', '5m': '5 minutes', '15m': '15 minutes', '30m': '30 minutes', '1h': '1 hour', '4h': '4 hours', '1d': '1 day', '1w': '1 week' } as Record<string, string>)[chartTfFromUrl] ?? ''; 
-  const [escrow, setEscrow] = useState('0.05');
+  const [escrow] = useState('0.05');
   const [slices, setSlices] = useState(params.get('slices') ?? '5');
   const [levels, setLevels] = useState(params.get('levels') ?? '5');
   const [costBasis, setCostBasis] = useState(params.get('costBasis') ?? '');
   const [dailyLossLimit, setDailyLossLimit] = useState(params.get('dailyLoss') ?? '5');
   const [stopLossBps, setStopLossBps] = useState(params.get('stopLoss') ?? '500');
   const [takeProfitBps, setTakeProfitBps] = useState(params.get('takeProfit') ?? '1000');
-  const [maxDrawdownBps, setMaxDrawdownBps] = useState(params.get('maxDrawdown') ?? '800');
+  const [maxDrawdownBps] = useState(params.get('maxDrawdown') ?? '800');
   const [targetUpsideBps, setTargetUpsideBps] = useState(params.get('targetUpside') ?? '1000');
-  const [copied, setCopied] = useState(false);
   const [sourceType, setSourceType] = useState<'strata' | 'asepad'>(params.get('venue') === 'asepad' ? 'asepad' : 'strata');
   const [deploying, setDeploying] = useState(false);
+  // A synchronous guard: React state updates arrive too late to stop the second
+  // click of a double-click, which used to start two launches at once. Their
+  // wallet timers then overwrote each other's progress.
+  const launchInFlightRef = useRef(false);
   const [stage, setStage] = useState('');
   const [resultAddress, setResultAddress] = useState('');
   const [resultWarning, setResultWarning] = useState('');
@@ -233,30 +238,6 @@ export function Deploy() {
   const tokensWithBalance = useMemo(() => {
     return userHoldings.filter((h) => !h.isNative && h.balanceNum > 0);
   }, [userHoldings]);
-
-  const applyTokenPercent = (pct: number) => {
-    if (!currentTokenHolding || currentTokenHolding.balanceNum <= 0) return;
-    const dec = selectedPool?.decimals ?? 18;
-    const totalRaw = BigInt(currentTokenHolding.balanceRaw);
-    const partRaw = (totalRaw * BigInt(Math.floor(pct * 100))) / 100n;
-    const scale = 10n ** BigInt(dec);
-    const whole = partRaw / scale;
-    const frac = (partRaw % scale).toString().padStart(dec, '0').slice(0, 4).replace(/0+$/, '');
-    const valStr = `${whole}${frac ? `.${frac}` : ''}`;
-    setBudget(valStr);
-    const budgetNum = Number(valStr);
-    if (Number(size) > budgetNum || Number(size) === 250) {
-      setSize(Math.max(1, Math.floor(budgetNum / 5)).toString());
-    }
-  };
-
-  const applyAsePercent = (pct: number) => {
-    if (!nativeHolding || nativeHolding.balanceNum <= 0) return;
-    const safeMax = Math.max(0, nativeHolding.balanceNum - 0.2);
-    const amount = (safeMax * pct).toFixed(2);
-    setBuyBudgetAse(amount);
-    setBuySizeAse((Math.max(1, Number(amount) / 5)).toFixed(2));
-  };
 
   const handleSelectPool = (targetPool: { id: string; venue?: string }) => {
     initialTokenHandledRef.current = true;
@@ -354,18 +335,6 @@ export function Deploy() {
     try { return toUnits(budget, decimals).toString(); } catch { return ''; }
   }, [budget, decimals]);
 
-  const command = `npm run deploy:${template.id} -- --pool ${poolId} --token ${selectedPool?.token ?? '<TOKEN_ADDRESS>'} --decimals ${decimals ?? 18} --threshold ${threshold} --size ${size}${template.trades ? ` --budget ${budget}` : ''} --interval ${interval} --escrow ${escrow} --levels ${levels} --slices ${slices} --buy-size-ase ${buySizeAse} --buy-budget-ase ${buyBudgetAse}${template.id === 'risk-managed' ? ` --cost-basis ${costBasis} --daily-loss ${dailyLossLimit} --stop-loss ${stopLossBps} --take-profit ${takeProfitBps} --max-drawdown ${maxDrawdownBps}` : ''}${template.id === 'scale' || template.id === 'limit-exit' ? ` --target-upside-bps ${targetUpsideBps}` : ''}${sourceType === 'asepad' ? ` --amm asedex` : ''}`;
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      setCopied(false);
-    }
-  };
-
   const [isWalletLocked, setIsWalletLocked] = useState(false);
 
   useEffect(() => {
@@ -394,7 +363,7 @@ export function Deploy() {
     };
   }, [wallet.connected]);
 
-  const deployLite = async () => {
+  async function runDeployLite() {
     setError('');
     setResultWarning('');
     setResultAddress('');
@@ -820,6 +789,16 @@ export function Deploy() {
     } finally {
       setDeploying(false);
     }
+  }
+
+  const deployLite = async () => {
+    if (launchInFlightRef.current) return;
+    launchInFlightRef.current = true;
+    try {
+      await runDeployLite();
+    } finally {
+      launchInFlightRef.current = false;
+    }
   };
 
   const sym = selectedPool?.symbol ?? 'TOKEN';
@@ -882,7 +861,7 @@ export function Deploy() {
   // what the wallet actually holds once, then leave every field editable.
   const autoSizedRef = useRef('');
   useEffect(() => {
-    if (mode !== 'lite' || !wallet.connected || !selectedPool) return;
+    if (!wallet.connected || !selectedPool) return;
     const key = `${selectedPool.id}:${template.id}`;
     if (autoSizedRef.current === key) return;
 
@@ -912,7 +891,7 @@ export function Deploy() {
       setBuySizeAse(divAmount(nextBudget, template.id === 'grid' ? levelCount : 1));
     }
     autoSizedRef.current = key;
-  }, [mode, wallet.connected, selectedPool, template.id, currentTokenHolding, nativeHolding, budget, buyBudgetAse, costBasis, botDecimals, sliceCount, levelCount]);
+  }, [wallet.connected, selectedPool, template.id, currentTokenHolding, nativeHolding, budget, buyBudgetAse, costBasis, botDecimals, sliceCount, levelCount]);
 
   const selectBotType = (id: string) => {
     const next = templateById(id);
@@ -1055,14 +1034,6 @@ export function Deploy() {
           Pick what the bot should do, choose the token and amount, then press launch. You only confirm a few wallet
           prompts — no pasting, no config files — and you can close the bot and get your funds back at any time.
         </p>
-        <div className="mode-switch" role="group" aria-label="Interface mode">
-          <button type="button" className={mode === 'lite' ? 'mode-option active' : 'mode-option'} onClick={() => setMode('lite')}>
-            <span>Simple</span><small>Bot terminal · recommended</small>
-          </button>
-          <button type="button" className={mode === 'pro' ? 'mode-option active' : 'mode-option'} onClick={() => setMode('pro')}>
-            <span>Pro</span><small>Raw parameters · CLI · all templates</small>
-          </button>
-        </div>
         {fromMarketplace && (
           <div className="notice marketplace-copy-notice" style={{ marginTop: 18, maxWidth: 760 }}>
             <strong>Community settings loaded</strong>
@@ -1073,8 +1044,13 @@ export function Deploy() {
 
       <section className="wrap" style={{ paddingBottom: 90 }}>
         <div className="terminal-grid">
-          {mode === 'lite' ? (
+          {(
             <div className="terminal-card">
+              <div className="bot-flow" aria-hidden="true">
+                <span><b>1</b>What it does</span>
+                <span><b>2</b>Token &amp; amount</span>
+                <span><b>3</b>Launch</span>
+              </div>
               <div className="bot-tabs" role="tablist" aria-label="Bot type">
                 {BOT_TYPES.map((bot) => (
                   <button
@@ -1451,276 +1427,6 @@ export function Deploy() {
                 )}
               </div>
             </div>
-          ) : (
-            <div>
-              <div className="step-num">PRO · EVERY TEMPLATE AND PARAMETER</div>
-              <div className="template-grid" style={{ marginTop: 14 }}>
-                {TEMPLATES.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={`template ${template.id === item.id ? 'on' : ''}`}
-                    onClick={() => { setTemplateId(item.id); setInterval(item.intervalSec); setError(''); }}
-                  >
-                    <div className="template-name">{item.name}</div>
-                    <div className="template-desc">{item.desc}</div>
-                    <div className="template-meta mono">
-                      every {item.intervalSec}s · {item.requires === 'gas' ? 'gas only' : item.requires === 'ase' ? 'ASE-funded buys' : item.requires === 'both' ? 'ASE + token funding' : 'token funding'}
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              <div className="strategy-behavior notice" style={{ marginTop: 16 }}>
-                <strong>What this contract actually does</strong>
-                <span>{template.behavior}</span>
-              </div>
-
-              <div className="step-num" style={{ marginTop: 34 }}>VENUE</div>
-              <div className="source-switch" role="group" aria-label="Contract source provider" style={{ marginTop: 14 }}>
-                <button type="button" className={sourceType === 'strata' ? 'source-choice active' : 'source-choice'} onClick={() => switchVenue('strata')}>
-                  <strong>Auras Finance (AMM)</strong><span>Automated spot execution & TWAP strategy deployment</span>
-                </button>
-                <button type="button" className={sourceType === 'asepad' ? 'source-choice active' : 'source-choice'} onClick={() => switchVenue('asepad')}>
-                  <strong>AsePad / AseDex</strong><span>Official launchpad, token factory & live exchange</span>
-                </button>
-              </div>
-
-              <div className="notice source-note" style={{ marginTop: 12 }}>
-                <strong>Selected venue: {sourceType === 'strata' ? 'Auras Finance AMM' : 'AsePad / AseDex AMM'}</strong>
-                <span>
-                  {sourceType === 'strata'
-                    ? 'Strata strategy contracts execute spot swaps and DCA purchases directly through verified Auras AMM pools.'
-                    : 'Strata strategy contracts execute spot swaps and DCA purchases directly through verified AseDex AMM pools on AsePad.'}
-                </span>
-              </div>
-
-              <div className="field" style={{ marginTop: 20 }}>
-                <label htmlFor="pool">Trading pair · {sourceType === 'strata' ? 'Auras pool' : 'AseDex pool'}</label>
-                <div className="pair-chips" role="group" aria-label="Quick pair selector">
-                  {livePools.slice(0, 5).map((pool) => (
-                    <button
-                      type="button"
-                      key={pool.id}
-                      className={`pair-chip ${pool.id === poolId ? 'active' : ''}`}
-                      onClick={() => setPoolId(pool.id)}
-                    >
-                      <span>{pool.symbol} / ASE</span>
-                      <span className="chip-spot">#{pool.id}</span>
-                    </button>
-                  ))}
-                </div>
-                <select
-                  id="pool"
-                  className="input"
-                  value={poolId}
-                  onChange={(event) => setPoolId(event.target.value)}
-                  disabled={(sourceType === 'strata' ? pools.loading : asedexPools.loading) || livePools.length === 0}
-                >
-                  {livePools.map((pool) => (
-                    <option key={pool.id} value={pool.id}>
-                      {pool.symbol}/ASE · pool #{pool.id} · spot {weiToAse(pool.spot, 6)} ASE · {pool.decimals ?? 18} decimals
-                    </option>
-                  ))}
-                </select>
-                {(sourceType === 'strata' ? pools.loading : asedexPools.loading) && <p className="field-help">Loading live pairs from Asentum…</p>}
-                {!(sourceType === 'strata' ? pools.loading : asedexPools.loading) && !livePools.length && (
-                  <p className="field-help warn">No live {sourceType === 'strata' ? 'Auras' : 'AseDex'} pools were returned. Deployment is disabled until the pool data loads.</p>
-                )}
-              </div>
-
-              {selectedPool && (
-                <div className="panel" style={{ marginTop: 12, marginBottom: 14 }}>
-                  <div className="panel-body" style={{ padding: '14px 18px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-                      <div>
-                        <strong style={{ fontSize: 16 }}>{selectedPool.symbol} / ASE</strong>
-                        <span className="mono dim" style={{ fontSize: 13.5, marginLeft: 8 }}>pool #{selectedPool.id}</span>
-                      </div>
-                      <span className="pill pill-live">Spot: {weiToAse(selectedPool.spot, 6)} ASE</span>
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginTop: 10, fontSize: 13.5 }}>
-                      <div><span className="label">Reserves ({selectedPool.symbol})</span><div className="mono">{weiToAse(selectedPool.reserveToken, 2)}</div></div>
-                      <div><span className="label">Reserves (ASE)</span><div className="mono">{weiToAse(selectedPool.reserveNative, 2)}</div></div>
-                      <div><span className="label">Token address</span><div className="mono break-value">{selectedPool.token}</div></div>
-                      <div><span className="label">Decimals</span><div className="mono">{selectedPool.decimals ?? 18}</div></div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {template.trades && template.id !== 'dca' && (
-                <div className="row-2">
-                  <div className="field">
-                    <label htmlFor="size">Token amount per run</label>
-                    <input id="size" className="input" value={size} onChange={(event) => setSize(event.target.value)} inputMode="decimal" />
-                  </div>
-                  <div className="field">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <label htmlFor="budget">Total token budget to deposit</label>
-                      {currentTokenHolding && (
-                        <span className="muted" style={{ fontSize: 13.5 }}>
-                          Bal: <strong className="mono">{currentTokenHolding.balanceFmt}</strong>
-                          <button type="button" className="quick-bal-btn" onClick={() => applyTokenPercent(0.25)}>25%</button>
-                          <button type="button" className="quick-bal-btn" onClick={() => applyTokenPercent(0.5)}>50%</button>
-                          <button type="button" className="quick-bal-btn" onClick={() => applyTokenPercent(1)}>MAX</button>
-                        </span>
-                      )}
-                    </div>
-                    <input id="budget" className="input" value={budget} onChange={(event) => setBudget(event.target.value)} inputMode="decimal" />
-                  </div>
-                </div>
-              )}
-
-              {(template.id === 'grid' || template.id === 'dca') && (
-                <div className="panel" style={{ marginTop: 18 }}>
-                  <div className="panel-head"><span className="label">{template.id === 'grid' ? 'Buy-side ASE reserve' : 'Recurring buy budget'}</span><span className="pill pill-live">{sourceType === 'strata' ? 'Auras' : 'AseDex'} spot buys</span></div>
-                  <div className="panel-body">
-                    <div className="row-2">
-                      <div className="field"><label htmlFor="buySizeAse">{template.id === 'grid' ? 'ASE per buy level' : 'ASE per purchase'}</label><input id="buySizeAse" className="input" value={buySizeAse} onChange={(event) => setBuySizeAse(event.target.value)} inputMode="decimal" /></div>
-                      <div className="field">
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <label htmlFor="buyBudgetAse">{template.id === 'grid' ? 'Total ASE buy reserve' : 'Total ASE DCA budget'}</label>
-                          {nativeHolding && (
-                            <span className="muted" style={{ fontSize: 13.5 }}>
-                              Bal: <strong className="mono">{nativeHolding.balanceFmt} ASE</strong>
-                              <button type="button" className="quick-bal-btn" onClick={() => applyAsePercent(0.25)}>25%</button>
-                              <button type="button" className="quick-bal-btn" onClick={() => applyAsePercent(0.5)}>50%</button>
-                              <button type="button" className="quick-bal-btn" onClick={() => applyAsePercent(1)}>MAX</button>
-                            </span>
-                          )}
-                        </div>
-                        <input id="buyBudgetAse" className="input" value={buyBudgetAse} onChange={(event) => setBuyBudgetAse(event.target.value)} inputMode="decimal" />
-                      </div>
-                    </div>
-                    <p className="field-help">This ASE amount is transferred to the strategy during initialization, in addition to the cron gas escrow. Unspent ASE can be withdrawn after stopping. Each {sourceType === 'strata' ? 'Auras' : 'AseDex'} swap is a separate atomic transaction.</p>
-                  </div>
-                </div>
-              )}
-
-              {template.id === 'risk-managed' && (
-                <div className="risk-config panel" style={{ marginTop: 18 }}>
-                  <div className="panel-head"><span className="label">Risk manager · enforced by this contract</span><span className="pill pill-live">On-chain rules</span></div>
-                  <div className="panel-body">
-                    <p className="muted" style={{ marginBottom: 14 }}>The strategy checks these limits on every scheduled run. Enter your average purchase cost so realised loss can be estimated in ASE. Stop-loss and take-profit use the {sourceType === 'strata' ? 'Auras' : 'AseDex'} pool price, not an external oracle.</p>
-                    <div className="row-2">
-                      <div className="field"><label htmlFor="costBasis">Average purchase cost · ASE / token</label><input id="costBasis" className="input" value={costBasis} onChange={(event) => setCostBasis(event.target.value)} placeholder="e.g. 0.025" inputMode="decimal" /></div>
-                      <div className="field"><label htmlFor="dailyLoss">Max realised daily loss · ASE</label><input id="dailyLoss" className="input" value={dailyLossLimit} onChange={(event) => setDailyLossLimit(event.target.value)} inputMode="decimal" /><p className="field-help">Stops before the next sale when estimated daily realised PnL reaches this loss.</p></div>
-                    </div>
-                    <div className="row-3">
-                      <div className="field"><label htmlFor="stopLoss">Stop-loss · %</label><input id="stopLoss" className="input" value={(Number(stopLossBps) / 100).toString()} onChange={(event) => setStopLossBps(String(Math.round(Number(event.target.value) * 100)))} inputMode="decimal" /></div>
-                      <div className="field"><label htmlFor="takeProfit">Take-profit · %</label><input id="takeProfit" className="input" value={(Number(takeProfitBps) / 100).toString()} onChange={(event) => setTakeProfitBps(String(Math.round(Number(event.target.value) * 100)))} inputMode="decimal" /></div>
-                      <div className="field"><label htmlFor="maxDrawdown">Max drawdown · %</label><input id="maxDrawdown" className="input" value={(Number(maxDrawdownBps) / 100).toString()} onChange={(event) => setMaxDrawdownBps(String(Math.round(Number(event.target.value) * 100)))} inputMode="decimal" /></div>
-                    </div>
-                    <p className="field-help">Price rules are checked only when the scheduled run executes (not continuously), using the {sourceType === 'strata' ? 'Auras' : 'AseDex'} pool spot price. A triggered stop-loss, take-profit or drawdown exit is latched and sells at most the configured token amount per scheduled run until the declared allocation is exhausted. Each sale has a 2% minimum-output guard. Daily loss uses your declared average cost and realised fills; it excludes unrealised inventory losses and gas.</p>
-                  </div>
-                </div>
-              )}
-
-              {template.id === 'limit-exit' && (
-                <div className="panel" style={{ marginTop: 18 }}>
-                  <div className="panel-head"><span className="label">Limit sell · reduce-only</span><span className="pill pill-live">One execution</span></div>
-                  <div className="panel-body">
-                    <div className="field"><label htmlFor="limitTargetPro">Target above current pool price · %</label><input id="limitTargetPro" className="input" value={(Number(targetUpsideBps) / 100).toString()} onChange={(event) => setTargetUpsideBps(String(Math.round(Number(event.target.value) * 100)))} inputMode="decimal" /></div>
-                    <p className="field-help">Strata records the current {sourceType === 'strata' ? 'Auras' : 'AseDex'} pool price at deployment, checks it on the selected schedule and sells one order size when the target is reached. This is not a continuously resting order-book limit.</p>
-                  </div>
-                </div>
-              )}
-
-              {template.id === 'scale' && (
-                <div className="panel" style={{ marginTop: 18 }}>
-                  <div className="panel-head"><span className="label">Scale ladder · reduce-only</span><span className="pill pill-live">Price triggered</span></div>
-                  <div className="panel-body">
-                    <div className="row-2">
-                      <div className="field"><label htmlFor="scaleTarget">Target above current price · %</label><input id="scaleTarget" className="input" value={(Number(targetUpsideBps) / 100).toString()} onChange={(event) => setTargetUpsideBps(String(Math.round(Number(event.target.value) * 100)))} inputMode="decimal" /></div>
-                      <div className="field"><label htmlFor="levels">Sell levels</label><input id="levels" className="input" value={levels} onChange={(event) => changeLevels(event.target.value)} inputMode="numeric" /></div>
-                    </div>
-                    <p className="field-help">Each level sells the amount set above. Strata checks the {sourceType === 'strata' ? 'Auras' : 'AseDex'} pool price on schedule and sells one slice when a trigger is reached. Reduce-only spot execution; the pool must reach the trigger while the cron job is active.</p>
-                  </div>
-                </div>
-              )}
-
-              <div className="row-2">
-                <div className="field">
-                  <label htmlFor="threshold">Threshold · bps <span className="dim">(100 bps = 1%)</span></label>
-                  <input id="threshold" className="input" value={threshold} onChange={(event) => setThreshold(event.target.value)} inputMode="numeric" />
-                </div>
-                <div className="field">
-                  <label htmlFor="escrow">Gas escrow · ASE</label>
-                  <input id="escrow" className="input" value={escrow} onChange={(event) => setEscrow(event.target.value)} inputMode="decimal" />
-                </div>
-              </div>
-
-              <div className="row-2">
-                <div className="field">
-                  <label htmlFor="interval">Execution interval · seconds</label>
-                  <input id="interval" className="input" value={interval} onChange={(event) => setInterval(Number(event.target.value))} inputMode="numeric" min={60} max={86400} disabled={!supportsCustomInterval} />
-                  {!supportsCustomInterval && <p className="field-help">This template uses its fixed on-chain schedule. Custom intervals must be 60–86,400 seconds.</p>}
-                  {supportsCustomInterval && <div className="chip-row"><button type="button" className={interval === 60 ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(60)}>1 min</button><button type="button" className={interval === 300 ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(300)}>5 min</button><button type="button" className={interval === 900 ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(900)}>15 min</button><button type="button" className={interval === 3600 ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(3600)}>1 hour</button></div>}
-                  {chartTfLabel && <p className="field-help">You opened this builder from a {chartTfLabel} chart. That chart interval is for visual analysis only; the execution interval above controls how often Cron runs the strategy.</p>}
-                </div>
-                <div className="field">
-                  <label htmlFor="levelsPro">Levels / slices</label>
-                  <div className="row-2">
-                    <input id="levelsPro" className="input" value={levels} onChange={(event) => changeLevels(event.target.value)} inputMode="numeric" aria-label="Levels" />
-                    <input className="input" value={slices} onChange={(event) => changeSlices(Number(event.target.value) || 1)} inputMode="numeric" aria-label="TWAP slices" />
-                  </div>
-                </div>
-              </div>
-
-              <details className="dev-accordion pro-command" style={{ marginTop: 18 }}>
-                <summary>Advanced: deploy from the terminal (optional — not needed here)</summary>
-                <div className="panel-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span className="label">PowerShell · CLI command</span>
-                  <span className="pill pill-live">{sourceType === 'asepad' ? 'AseDex AMM' : 'Auras AMM'}</span>
-                </div>
-                <div className="cmd" style={{ margin: 14 }}>
-                  <span className="prompt">PS&gt;</span><span>{command}</span>
-                  <button onClick={copy} type="button">{copied ? 'copied' : 'copy'}</button>
-                </div>
-                <div className="panel-body">
-                  <p className="muted">Run from the project root in PowerShell. The local CLI signs with the seed in <code>.strata/seed.json</code> or the <code>STRATA_SEED</code> environment variable. Back up the seed securely; do not send it to anyone.</p>
-                </div>
-              </details>
-
-              <div className="lite-deploy-panel" style={{ marginTop: 18 }}>
-                <div>
-                  <div className="template-name">Ready to deploy?</div>
-                  <p className="muted" style={{ marginTop: 5 }}>Your wallet signs each step. No seed phrase or private key is requested by this page.</p>
-                </div>
-                <button className="btn btn-primary" type="button" onClick={deployLite} disabled={launchDisabled || isWalletLocked}>
-                  {deploying ? 'Working…' : !wallet.connected ? 'Connect wallet to deploy' : isWalletLocked ? '🔒 Unlock wallet in browser to deploy' : 'Deploy with wallet'}
-                </button>
-                {stage && <div className="deploy-stage" role="status">{stage}</div>}
-                {error && <div className="notice deploy-error" role="alert">{error}</div>}
-                {resultWarning && <div className="notice deploy-warning">{resultWarning}</div>}
-                {resultAddress && (
-                  <div className="deploy-result">
-                    <div className="live-dot">Contract deployed</div>
-                    <a className="mono" href={`https://explorer.asentum.com/address/${displayAseAddress(resultAddress)}`} target="_blank" rel="noreferrer">{displayAseAddress(resultAddress)}</a>
-                    <div className="muted">{registrationOk ? 'Published to the leaderboard.' : publishToHub ? 'Check the leaderboard warning above.' : 'Saved in your Portfolio.'} Review the transaction receipts in the explorer.</div>
-                  </div>
-                )}
-              </div>
-
-              <div className="panel" style={{ marginTop: 20 }}>
-                <div className="panel-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span className="label">Live {sourceType === 'asepad' ? 'AseDex' : 'Auras'} pairs ({(sourceType === 'asepad' ? asedexPools.loading : pools.loading) ? '…' : livePools.length})</span>
-                  <span className="mono dim" style={{ fontSize: 13 }}>Asentum testnet</span>
-                </div>
-                <div className="panel-body pool-live-list">
-                  {livePools.slice(0, 12).map((pool) => (
-                    <button type="button" key={pool.id} className={pool.id === poolId ? 'pool-live-row selected' : 'pool-live-row'} onClick={() => setPoolId(pool.id)}>
-                      <span>{pool.symbol}/ASE <small>#{pool.id}</small></span>
-                      <span className="mono">{weiToAse(pool.reserveNative, 2)} ASE</span>
-                      <span className="mono dim">spot {weiToAse(pool.spot, 6)}</span>
-                    </button>
-                  ))}
-                  {(sourceType === 'asepad' ? asedexPools.loading : pools.loading) && <p className="muted">Loading live pairs from Asentum…</p>}
-                  {!(sourceType === 'asepad' ? asedexPools.loading : pools.loading) && !livePools.length && <p className="muted">Pool data is unavailable right now.</p>}
-                </div>
-              </div>
-            </div>
           )}
 
           <aside className="terminal-side">
@@ -1746,28 +1452,6 @@ export function Deploy() {
                 </div>
               </div>
             </div>
-
-            {mode === 'pro' && (
-              <div className="panel">
-                <div className="panel-head"><span className="label">Raw parameters</span></div>
-                <div className="panel-body">
-                  <dl className="kv">
-                    <dt>Template</dt><dd>{template.id}</dd>
-                    <dt>Venue</dt><dd>{sourceType === 'asepad' ? 'AseDex AMM' : 'Auras AMM'}</dd>
-                    <dt>Pool</dt><dd>{selectedPool ? `#${selectedPool.id} · ${selectedPool.symbol}/ASE` : '—'}</dd>
-                    <dt>Threshold</dt><dd>{threshold} bps</dd>
-                    <dt>Token budget</dt><dd>{template.trades && template.id !== 'dca' ? `${budget} ${sym}` : '—'}</dd>
-                    <dt>Sell size</dt><dd>{template.trades && template.id !== 'dca' ? `${size} ${sym}` : '—'}</dd>
-                    <dt>ASE buy size</dt><dd>{template.id === 'dca' || template.id === 'grid' ? `${buySizeAse} ASE` : '—'}</dd>
-                    <dt>ASE buy reserve</dt><dd>{template.id === 'dca' || template.id === 'grid' ? `${buyBudgetAse} ASE` : '—'}</dd>
-                    <dt>Cadence</dt><dd>{interval}s</dd>
-                    <dt>Levels / slices</dt><dd>{template.id === 'grid' || template.id === 'scale' ? levels : template.id === 'twap' ? slices : '—'}</dd>
-                    <dt>Gas escrow</dt><dd>{escrow} ASE</dd>
-                    <dt>Needs</dt><dd>{template.id === 'dca' ? 'ASE budget + cron gas' : template.id === 'grid' ? 'Token inventory + ASE buy reserve + cron gas' : template.requires === 'gas' ? 'ASE only' : 'ASE + token budget'}</dd>
-                  </dl>
-                </div>
-              </div>
-            )}
 
             <div className="panel">
               <div className="panel-body">
@@ -1959,6 +1643,14 @@ export function Deploy() {
               <div className="notice" style={{ borderColor: 'var(--down)', background: 'var(--down-soft)', marginBottom: 16 }}>
                 <strong style={{ color: 'var(--down)' }}>Transaction halted:</strong>
                 <p style={{ margin: '4px 0 0', fontSize: 13 }}>{stepError}</p>
+                {resultAddress && currentStep > 1 && (
+                  <p style={{ margin: '8px 0 0', fontSize: 13, lineHeight: 1.55 }}>
+                    The contract <span className="mono">{shortAddr(resultAddress, 10, 6)}</span> is already on chain and saved in your Portfolio.
+                    {currentStep === 3
+                      ? ' Finish its token deposit there instead of creating a duplicate.'
+                      : ' Remove it there before starting over — a retry here creates a second contract.'}
+                  </p>
+                )}
                 {/session|expired|locked/i.test(stepError) && (
                   <div style={{ marginTop: 10, padding: '10px 12px', background: 'var(--warn-soft)', border: '1px solid var(--warn)', borderRadius: 6 }}>
                     <strong style={{ color: 'var(--warn)', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1999,7 +1691,11 @@ export function Deploy() {
                   <button type="button" className="btn btn-ghost" onClick={() => setModalOpen(false)}>
                     Close
                   </button>
-                  {/session|expired|locked|reconnect/i.test(stepError) ? (
+                  {resultAddress && currentStep === 3 ? (
+                    <Link to="/portfolio" className="btn btn-primary" onClick={() => setModalOpen(false)}>
+                      Finish deposit in Portfolio ↗
+                    </Link>
+                  ) : /session|expired|locked|reconnect/i.test(stepError) ? (
                     <>
                       <button
                         type="button"
@@ -2036,7 +1732,7 @@ export function Deploy() {
                     </>
                   ) : (
                     <button type="button" className="btn btn-primary" onClick={deployLite}>
-                      Retry deployment
+                      {resultAddress && currentStep > 1 ? 'Start over from scratch' : 'Retry deployment'}
                     </button>
                   )}
                 </>

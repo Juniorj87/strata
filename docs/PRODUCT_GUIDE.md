@@ -11,8 +11,8 @@ This document describes the current implementation in this repository. It distin
 
 | Area | Route | Current behaviour |
 |---|---|---|
-| Swap | `/swap` | Wallet-signed AMM swaps using live pool reads and a fresh quote. |
-| Advanced Trading | `/advanced` | Indexed OHLCV charts, recent fills, AMM market swaps and supported Auras v2 escrowed limit orders. |
+| Swap | `/swap` | Wallet-signed AMM swaps routed to whichever live pool (Auras or AseDex) pays the most, including token-to-token via ASE. |
+| Advanced Trading | `/advanced` | Indexed OHLCV charts, recent fills, best-route AMM market swaps and supported Auras v2 escrowed limit orders. |
 | Bot Builder | `/deploy` | Deploys and initializes one of the eight strategy contracts, funds its trading budget and Cron escrow, and starts the schedule. |
 | Strategies | `/strategies` | Discovers and filters live strategy contracts and catalog templates. |
 | Portfolio | `/portfolio` | Reads the connected wallet's strategy contracts, token balances and local history. |
@@ -47,6 +47,24 @@ Empty periods remain gaps. The app must not invent a candle, trade, volume, quot
 - Limit orders escrow the input asset and are evaluated against AMM pool liquidity. They are not conventional resting order-book orders and there is no matching engine.
 - AseDex and unsupported legacy pools remain market-swap-only in this interface.
 - The order list is a view of open escrowed AMM orders, not a central limit order book.
+
+### Best-route swaps (cross-DEX)
+
+`src/lib/router.ts` quotes every live pool for the selected asset on both Auras and AseDex and executes the route with the largest output. Details:
+
+- Token <-> ASE swaps compare each venue's pool and keep the better price; the losing quote is reported in the swap sidebar, not hidden.
+- Token -> token swaps have no direct pool in the current AMMs, so the router builds a token -> ASE -> token route. Each hop is routed independently to its best venue.
+- Each hop carries its own minimum-output guard. The second hop is re-quoted from the ASE amount the first hop actually delivered, so slippage on hop one cannot make hop two revert.
+- A routed swap produces one transaction (plus an approval when the input is an ARC-20 token) per hop. The swap history records each leg separately with its venue and pool.
+- Market orders on `/advanced` use the same router, so they are not locked to the pair selected for the chart.
+
+The router is not a smart-order splitter: it compares venues and picks the best single route, it does not split one trade across pools.
+
+On-chain bot templates still execute the single pool and AMM configured at deploy time. They are not routed per run: Asentum Cron calls the strategy contract directly, and cross-DEX bot execution would require a deployed router contract that the current templates do not call. Best-route applies to `/swap` and to market orders on `/advanced`.
+
+### Finished bots
+
+`/portfolio` shows a **Remove from list** action once a bot is stopped, failed or its cron escrow is gone. Removing only deletes the local browser record; the contract and its history stay on chain and remain reachable through its address. Withdrawing funds is separate and still requires the owner wallet.
 
 ### Creating a bot from a market
 

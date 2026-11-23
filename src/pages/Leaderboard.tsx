@@ -1,13 +1,16 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
-import { loadProtocol, strategyRows, walletRows, type StrategyRow, type WalletRow } from '../lib/protocol';
+import { loadProtocol, POINTS, strategyRows, walletRows, type StrategyRow, type WalletRow } from '../lib/protocol';
+import { toHexAddress } from '../lib/rpc';
 import { fmtAgeFrom, fmtNum, fmtWei, formatUnits, shortAddr } from '../lib/format';
 import { botTypeFor } from '../lib/templates';
 
-type SortKey = 'running' | 'fills' | 'gross' | 'recent';
+type SortKey = 'points' | 'running' | 'fills' | 'gross' | 'recent';
 
 const COLUMNS: { key: SortKey; label: string }[] = [
+  { key: 'points', label: 'Points' },
   { key: 'running', label: 'Bots running' },
   { key: 'fills', label: 'Executions' },
   { key: 'gross', label: 'Gross ASE' },
@@ -20,6 +23,7 @@ function asBig(value: string): bigint {
 
 function walletValue(row: WalletRow, key: SortKey): number {
   switch (key) {
+    case 'points': return row.points;
     case 'gross': return Number(asBig(row.grossAseWei));
     case 'recent': return row.lastFillAt ?? 0;
     case 'fills': return row.fills;
@@ -34,8 +38,9 @@ function strategyValue(row: StrategyRow, key: 'fills' | 'gross' | 'recent'): num
 }
 
 export function Leaderboard() {
+  const wallet = useWallet();
   const { data, loading, error, refresh } = useAsync(() => loadProtocol(), 30_000);
-  const [sortKey, setSortKey] = useState<SortKey>('running');
+  const [sortKey, setSortKey] = useState<SortKey>('points');
   const [sortDesc, setSortDesc] = useState(true);
   const [strategySort, setStrategySort] = useState<'fills' | 'gross' | 'recent'>('fills');
 
@@ -65,6 +70,18 @@ export function Leaderboard() {
     () => strategies.filter((row) => row.strategy.cron !== null && row.strategy.stopped !== true).length,
     [strategies],
   );
+
+  const totalPoints = useMemo(() => wallets.reduce((sum, row) => sum + row.points, 0), [wallets]);
+  const myWallet = useMemo(() => {
+    if (!wallet.address) return null;
+    let address = wallet.address.trim().toLowerCase();
+    try { address = toHexAddress(address).toLowerCase(); } catch { /* keep the raw form */ }
+    return wallets.find((row) => row.wallet.toLowerCase() === address) ?? null;
+  }, [wallets, wallet.address]);
+  const myRank = useMemo(() => {
+    if (!myWallet) return -1;
+    return sortedWallets.findIndex((row) => row.wallet.toLowerCase() === myWallet.wallet.toLowerCase());
+  }, [sortedWallets, myWallet]);
 
   const toggleSort = (key: SortKey) => {
     if (key === sortKey) setSortDesc((desc) => !desc);
@@ -99,18 +116,12 @@ export function Leaderboard() {
           live AMM quote. A bot with an ended schedule still counts in its wallet&apos;s history but not in the
           running count.
         </p>
-        <div className="mode-switch" role="tablist" style={{ marginTop: 22 }}>
-          <Link to="/analytics" className="mode-option">
-            <span>Overview</span>
-            <small>Volume &amp; executions</small>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 22 }}>
+          <Link className="btn btn-ghost btn-sm" to="/activity">
+            All fills →
           </Link>
-          <Link to="/activity" className="mode-option">
-            <span>Fills</span>
-            <small>Every indexed fill</small>
-          </Link>
-          <Link to="/leaderboard" className="mode-option active">
-            <span>Leaderboard</span>
-            <small>Wallets ranked</small>
+          <Link className="btn btn-ghost btn-sm" to="/deploy">
+            Launch a bot to earn points
           </Link>
         </div>
       </section>
@@ -136,10 +147,37 @@ export function Leaderboard() {
           </div>
         )}
 
+        <div className="panel" style={{ marginBottom: 18 }}>
+          <div className="panel-body" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' }}>
+            <div>
+              <span className="label">Your points</span>
+              <strong style={{ display: 'block', fontSize: 30, marginTop: 4 }}>
+                {myWallet ? fmtNum(myWallet.points) : wallet.connected ? '0' : '—'}
+              </strong>
+              <span className="muted" style={{ fontSize: 13 }}>
+                {!wallet.connected
+                  ? 'Connect a wallet to see your points and rank.'
+                  : myWallet
+                    ? `Rank #${myRank + 1} of ${sortedWallets.length} · ${myWallet.strategies} bots · ${fmtNum(myWallet.fills)} executions · ${fmtWei(myWallet.grossAseWei, 2)} gross ASE`
+                    : 'No verified bot found for this wallet yet. Launch a bot; points appear after its first indexed execution.'}
+              </span>
+            </div>
+            <div className="muted" style={{ fontSize: 13, lineHeight: 1.7, maxWidth: 380 }}>
+              <strong style={{ color: 'var(--text)', display: 'block', marginBottom: 3 }}>How points are earned</strong>
+              {POINTS.perBot} per launched bot · {POINTS.perFill} per execution · 1 per {POINTS.asePerPoint} ASE received.
+              Only verified on-chain activity counts, so points cannot be claimed by clicking around.
+            </div>
+          </div>
+        </div>
+
         <div className="leaderboard-stats">
           <div className="metric">
             <span className="label">Ranked wallets</span>
             <strong>{data ? fmtNum(wallets.length) : '—'}</strong>
+          </div>
+          <div className="metric">
+            <span className="label">Points awarded</span>
+            <strong>{data ? fmtNum(totalPoints) : '—'}</strong>
           </div>
           <div className="metric">
             <span className="label">Bots running</span>
@@ -241,6 +279,7 @@ export function Leaderboard() {
                         </span>
                       </td>
                       <td className="mono">{wallet.strategies}</td>
+                      <td className="mono"><strong>{fmtNum(wallet.points)}</strong></td>
                       <td className="mono">{fmtNum(wallet.running)}</td>
                       <td className="mono">{fmtNum(wallet.fills)}</td>
                       <td className="mono">{fmtWei(wallet.grossAseWei, 3)}</td>
@@ -350,9 +389,13 @@ export function Leaderboard() {
             owner field is that address, fills come from swap receipts attributed to those contracts, and the
             running count only includes bots whose cron job still exists and whose stop flag is false. Volume is
             the token amount sold, quoted in the token&apos;s own decimals and never merged across assets. Gross ASE
-            received is quote volume from token → ASE fills — proceeds, not profit. Open inventory is a live AMM
-            quote of unsold tokens. No ROI or PnL is displayed here because a reliable profit figure needs a
-            per-strategy cost basis, which is only computed on the strategy page where it can be explained.
+            received is quote volume from token → ASE fills — proceeds, not profit.            Open inventory is a live AMM
+            quote of unsold tokens. Points are awarded only for verified on-chain actions: {POINTS.perBot} for a
+            bot that reaches the registry, {POINTS.perFill} for every indexed execution, and 1 point for each{' '}
+            {POINTS.asePerPoint} ASE received. Points are recomputed from chain data on every load; nothing is
+            stored off-chain. No ROI or
+            PnL is displayed here because a reliable profit figure needs a per-strategy cost basis, which is only
+            computed on the strategy page where it can be explained.
           </span>
         </div>
       </section>

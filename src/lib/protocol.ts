@@ -408,6 +408,27 @@ export interface WalletRow {
   inventoryAseWei: string;
   tokens: string[];
   lastFillAt: number | null;
+  /** Season points earned from verified on-chain actions. */
+  points: number;
+}
+
+/** Published point values, so the leaderboard can explain every number. */
+export const POINTS = {
+  perBot: 100,
+  perFill: 10,
+  asePerPoint: 10,
+} as const;
+
+/**
+ * Points are derived only from verified on-chain actions: launching a bot,
+ * executing a fill, and the ASE actually received. No off-chain clicks, no
+ * self-reported numbers, so two wallets cannot earn the same action twice.
+ */
+export function walletPoints(row: Pick<WalletRow, 'strategies' | 'fills' | 'grossAseWei'>): number {
+  const grossAse = Number(asBig(row.grossAseWei)) / 1e18;
+  return row.strategies * POINTS.perBot
+    + row.fills * POINTS.perFill
+    + Math.floor(grossAse / POINTS.asePerPoint);
 }
 
 /** Wallets aggregated from the same strategy snapshot, for the secondary ranking. */
@@ -426,6 +447,7 @@ export function walletRows(snapshot: ProtocolSnapshot): WalletRow[] {
       inventoryAseWei: '0',
       tokens: [],
       lastFillAt: null,
+      points: 0,
     };
     row.strategies += 1;
     if (strategy.cron !== null && strategy.stopped !== true) row.running += 1;
@@ -437,11 +459,14 @@ export function walletRows(snapshot: ProtocolSnapshot): WalletRow[] {
     if (strategy.lastFillAt) row.lastFillAt = Math.max(row.lastFillAt ?? 0, strategy.lastFillAt);
     map.set(wallet, row);
   }
-  return [...map.values()].sort((a, b) => {
-    const diff = asBig(b.grossAseWei) - asBig(a.grossAseWei);
-    if (diff !== 0n) return diff > 0n ? 1 : -1;
-    return b.fills - a.fills;
-  });
+  return [...map.values()]
+    .map((row) => ({ ...row, points: walletPoints(row) }))
+    .sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      const diff = asBig(b.grossAseWei) - asBig(a.grossAseWei);
+      if (diff !== 0n) return diff > 0n ? 1 : -1;
+      return b.fills - a.fills;
+    });
 }
 
 /** True when a fill is a native ASE purchase rather than a token sale. */

@@ -230,23 +230,19 @@ The application interacts with the Asentum blockchain through:
 - Error tracking
 - Performance metrics
 
-## 🔧 Deployment Architecture
+## 🔧 Hosting & Strategy Lifecycle
 
-### Application Deployment
+### Hosting model
 
-1. Build production bundle with Vite
-2. Deploy to static hosting (e.g., Vercel, Netlify)
-3. Configure environment variables
-4. Enable production mode
+Strata is a static Vite/React client. The production bundle contains no backend, database or server-side wallet state; all chain reads and writes happen in the browser, and signing is delegated to the connected Asentum wallet. The app is served from the linked Vercel project with an SPA rewrite to `index.html`, so client routes work on refresh. The same build can also be served by any static host.
 
-### Strategy Deployment
+### Strategy lifecycle
 
-1. Generate deterministic wallet
-2. Fund wallet with ASE tokens
-3. Deploy contract to chain
-4. Register cron job
-5. Verify BLAKE3 hash
-6. Fund gas escrow
+1. The owner wallet deploys a strategy contract from the browser.
+2. The owner calls `init()` to store the rules, arm the cron job and fund its gas escrow.
+3. Non-DCA templates receive their token allocation in a wallet-signed transfer.
+4. The browser verifies the deployed source hash and records the contract locally.
+5. Cron executes `tick()` on schedule; the owner can stop the bot and withdraw remaining funds at any time.
 
 ## 🚀 Performance Considerations
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Candle } from '../lib/marketData';
 import { fmtNum } from '../lib/format';
 
@@ -57,7 +57,7 @@ function fullTime(seconds: number): string {
 export function CandleChart({
   candles,
   intervalSec,
-  height = 380,
+  height = 440,
   symbol,
   loading = false,
   error = null,
@@ -75,7 +75,9 @@ export function CandleChart({
   const [hover, setHover] = useState<{ index: number; x: number; y: number } | null>(null);
   const [ema20, setEma20] = useState(true);
   const [ema50, setEma50] = useState(false);
+  const [style, setStyle] = useState<'line' | 'candles'>('line');
   const [markMode, setMarkMode] = useState(false);
+  const gradientId = `candle-fill-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const [priceMarks, setPriceMarks] = useState<number[]>([]);
   const drag = useRef<{ startX: number; startPan: number } | null>(null);
 
@@ -111,14 +113,21 @@ export function CandleChart({
   const low = Math.max(0, rawLow - priceSpan * 0.06);
   const scale = high - low || 1;
 
+  const xFor = (time: number) => padLeft + ((time - start) / (end - start)) * innerW;
+  const yFor = (price: number) => padTop + priceHeight - ((price - low) / scale) * priceHeight;
+  const candleWidth = Math.max(1.5, Math.min(18, (intervalSec / (end - start)) * innerW * 0.68));
+
   const maxVolume = Math.max(...shown.map((candle) => candle.volume), 0) || 1;
+  const linePath = shown
+    .map((candle, index) => `${index === 0 ? 'M' : 'L'} ${xFor(candle.time + intervalSec / 2)} ${yFor(candle.close)}`)
+    .join(' ');
+  const areaPath = shown.length > 1
+    ? `${linePath} L ${xFor(shown[shown.length - 1].time + intervalSec / 2)} ${padTop + priceHeight} L ${xFor(shown[0].time + intervalSec / 2)} ${padTop + priceHeight} Z`
+    : '';
   const emaPath = (period: number) => {
     const alpha = 2 / (period + 1); let value = shown[0]?.close ?? 0;
     return shown.map((candle, index) => { value = index === 0 ? candle.close : candle.close * alpha + value * (1 - alpha); return `${index === 0 ? 'M' : 'L'} ${xFor(candle.time + intervalSec / 2)} ${yFor(value)}`; }).join(' ');
   };
-  const xFor = (time: number) => padLeft + ((time - start) / (end - start)) * innerW;
-  const yFor = (price: number) => padTop + priceHeight - ((price - low) / scale) * priceHeight;
-  const candleWidth = Math.max(1.5, Math.min(18, (intervalSec / (end - start)) * innerW * 0.68));
 
   const ticks = Array.from({ length: 4 }, (_, i) => low + (scale * i) / 3);
   const timeTicks = Array.from({ length: 4 }, (_, i) => start + (spanSeconds * i) / 3);
@@ -186,6 +195,8 @@ export function CandleChart({
         </div>
         <div className="candle-chart-tools">
           <span className="mono muted">{shown.length} candles</span>
+          <button type="button" className={style === 'line' ? 'chip active' : 'chip'} onClick={() => setStyle('line')}>Line</button>
+          <button type="button" className={style === 'candles' ? 'chip active' : 'chip'} onClick={() => setStyle('candles')}>Candles</button>
           <button type="button" className={ema20 ? 'chip active' : 'chip'} onClick={() => setEma20((v) => !v)}>EMA 20</button>
           <button type="button" className={ema50 ? 'chip active' : 'chip'} onClick={() => setEma50((v) => !v)}>EMA 50</button>
           <button type="button" className={markMode ? 'chip active' : 'chip'} onClick={() => setMarkMode((v) => !v)}>＋ Price level</button>
@@ -215,6 +226,13 @@ export function CandleChart({
         onPointerLeave={() => { setHover(null); stopDrag(); }}
         style={{ display: 'block', touchAction: 'none', cursor: drag.current ? 'grabbing' : 'crosshair' }}
       >
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.24" />
+            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+
         {ticks.map((tick) => (
           <g key={tick}>
             <line x1={padLeft} x2={padLeft + innerW} y1={yFor(tick)} y2={yFor(tick)} stroke="var(--line-soft)" />
@@ -224,8 +242,14 @@ export function CandleChart({
           </g>
         ))}
 
-        {ema20 && shown.length > 1 && <path d={emaPath(20)} fill="none" stroke="var(--accent)" strokeWidth="1.5" opacity="0.9" />}
-        {ema50 && shown.length > 1 && <path d={emaPath(50)} fill="none" stroke="var(--accent-2)" strokeWidth="1.5" opacity="0.9" />}
+        {style === 'line' && shown.length > 1 && (
+          <>
+            <path d={areaPath} fill={`url(#${gradientId})`} stroke="none" />
+            <path d={linePath} fill="none" stroke="var(--accent)" strokeWidth="1.7" strokeLinejoin="round" strokeLinecap="round" />
+          </>
+        )}
+        {ema20 && shown.length > 1 && <path d={emaPath(20)} fill="none" stroke="var(--accent)" strokeWidth="1.2" opacity="0.5" />}
+        {ema50 && shown.length > 1 && <path d={emaPath(50)} fill="none" stroke="var(--accent-2)" strokeWidth="1.2" opacity="0.6" />}
         {priceMarks.map((price, index) => price >= low && price <= high ? <g key={`${price}-${index}`}><line x1={padLeft} x2={padLeft + innerW} y1={yFor(price)} y2={yFor(price)} stroke="var(--warn)" strokeDasharray="5 4"/><text x={padLeft + innerW - 4} y={yFor(price) - 4} textAnchor="end" fill="var(--warn)" fontSize="11">{priceFmt(price)}</text></g> : null)}
         {shown.map((candle) => {
           const x = xFor(candle.time + intervalSec / 2);
@@ -236,16 +260,20 @@ export function CandleChart({
           const volH = (candle.volume / maxVolume) * volHeight;
           return (
             <g key={candle.time}>
-              <line x1={x} x2={x} y1={yFor(candle.high)} y2={yFor(candle.low)} stroke={color} strokeWidth="1" />
-              <rect
-                x={x - candleWidth / 2}
-                y={bodyTop}
-                width={candleWidth}
-                height={Math.max(1, bodyBottom - bodyTop)}
-                fill={up ? 'var(--up-soft)' : 'var(--down-soft)'}
-                stroke={color}
-                strokeWidth="1"
-              />
+              {style === 'candles' && (
+                <>
+                  <line x1={x} x2={x} y1={yFor(candle.high)} y2={yFor(candle.low)} stroke={color} strokeWidth="1" />
+                  <rect
+                    x={x - candleWidth / 2}
+                    y={bodyTop}
+                    width={candleWidth}
+                    height={Math.max(1, bodyBottom - bodyTop)}
+                    fill={up ? 'var(--up-soft)' : 'var(--down-soft)'}
+                    stroke={color}
+                    strokeWidth="1"
+                  />
+                </>
+              )}
               <rect
                 x={x - candleWidth / 2}
                 y={volTop + volHeight - volH}

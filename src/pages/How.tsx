@@ -17,7 +17,7 @@ const STEPS = [
   {
     number: '01',
     title: 'Choose what you want the bot to do',
-    text: 'In the simple terminal pick one of five behaviours: DCA, take-profit, grid, stop-loss or TWAP. Pro exposes all eight templates with raw parameters, the CLI command and contract inspection.',
+    text: 'Pick one of five behaviours: DCA, take-profit, grid, stop-loss or TWAP. Every field is plain language, and the review panel shows exactly what the bot will do before you sign.',
   },
   {
     number: '02',
@@ -43,8 +43,8 @@ const STEPS = [
 
 const FAQ = [
   {
-    q: 'Do I need to install anything to use Lite?',
-    a: 'No. You need an Asentum wallet and some ASE for the network fee. Lite runs in the browser and never asks for a seed phrase. Pro mode is optional and aimed at developers who want raw parameters, source inspection and a local CLI workflow.',
+    q: 'Do I need to install anything?',
+    a: 'No. You need an Asentum wallet and some ASE for the network fee. Strata runs in the browser and never asks for a seed phrase.',
   },
   {
     q: 'What happens when the gas escrow runs out?',
@@ -86,17 +86,13 @@ export function How() {
             stopping and withdrawal — is a transaction your wallet signs.
           </p>
           <p>
-            The product is deliberately split in two. <strong style={{ color: 'var(--text)' }}>Lite</strong> is the
-            default: five guided bot types, plain-language review, no code. <strong style={{ color: 'var(--text)' }}>Pro</strong>{' '}
-            exposes all eight templates, raw parameters, the source hash and a PowerShell command for a local
-            signer.
+            There is one builder: five guided bot types, a plain-language review, and a few wallet prompts. No raw
+            configuration and no code needed. The three advanced templates still ship in <code>contracts/</code>{' '}
+            for CLI deployments, but they are not part of the simple flow.
           </p>
           <div className="doc-hero-actions">
             <Link className="btn btn-primary" to="/deploy">
               Create a strategy <span className="arr" aria-hidden="true">→</span>
-            </Link>
-            <Link className="btn btn-ghost" to="/deploy?mode=pro">
-              Open Pro mode
             </Link>
             <Link className="btn btn-ghost" to="/strategies">
               Browse the catalog
@@ -126,8 +122,8 @@ export function How() {
         <section id="templates">
           <h2>Templates</h2>
           <p>
-            Eight contracts are supported. The five in the simple terminal are marked below; every template is
-            available in Pro with its full parameter set.
+            Eight contracts are supported. Five are available in the builder; the other three are advanced
+            templates deployed from the CLI.
           </p>
 
           <div className="table-scroll">
@@ -156,7 +152,7 @@ export function How() {
                       <td>
                         {template.name}
                         <span className="dim" style={{ display: 'block', fontSize: 12.5, fontWeight: 400, marginTop: 3 }}>
-                          {guided ? 'Lite + Pro' : 'Pro only'}
+                          {guided ? 'Simple builder' : 'CLI only'}
                         </span>
                       </td>
                       <td>{needs}</td>

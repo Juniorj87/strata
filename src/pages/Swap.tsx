@@ -5,17 +5,19 @@ import { useAsync } from '../lib/hooks';
 import { loadAseDexPools, loadPools } from '../lib/registry';
 import { explorerTxUrl, getHeads, toHexAddress } from '../lib/rpc';
 import { fetchUserTokenHoldings, type UserTokenHolding } from '../lib/userStrategies';
-import { fmtNum, fmtTimestamp, formatUnits, parseUnits, shortHash, weiToAse } from '../lib/format';
+import { fmtNum, fmtTimestamp, formatUnits, parseUnits, shortHash } from '../lib/format';
 import {
   ASE_TOKEN,
-  executeSwap,
-  quoteSwap,
-  readSwappedAmount,
   swapTokens,
-  type SwapQuote,
   type SwapToken,
 } from '../lib/swap';
-import { reconcileSwaps, saveSwap, updateSwap, type SwapHistoryRecord } from '../lib/swapHistory';
+import {
+  executeRoute,
+  findRoute,
+  routeLabel,
+  type RouteQuote,
+} from '../lib/router';
+import { reconcileSwaps, saveSwap, type SwapHistoryRecord } from '../lib/swapHistory';
 import { TokenMark } from '../components/TokenMark';
 
 const SLIPPAGE_KEY = 'strata:slippage-bps';
@@ -131,7 +133,7 @@ function TokenPicker({
           })}
         </div>
         <p className="muted swap-picker-note">
-          Every token here comes from a live pool read on chain. Tokens without an ASE pool are not listed.
+          Every token here comes from a live pool read on chain. The router compares both AMMs automatically.
         </p>
       </div>
     </div>
@@ -150,6 +152,20 @@ export function Swap() {
     [pools.data, asedexPools.data],
   );
   const allTokens = useMemo(() => [...universe.ase, ...universe.tokens], [universe]);
+  // The router needs one entry per venue, but the picker should show a token
+  // once. Showing Auras and AseDex rows for the same asset only confused the
+  // choice; the winning venue is shown in the route panel instead.
+  const pickerTokens = useMemo(() => {
+    const seen = new Set<string>();
+    const out: SwapToken[] = [];
+    for (const token of allTokens) {
+      const key = token.address.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(token);
+    }
+    return out;
+  }, [allTokens]);
 
   const [tokenIn, setTokenIn] = useState<SwapToken>(ASE_TOKEN);
   const [tokenOut, setTokenOut] = useState<SwapToken | null>(null);
@@ -157,7 +173,7 @@ export function Swap() {
   const [slippageBps, setSlippageBps] = useState(readSlippage);
   const [picker, setPicker] = useState<'in' | 'out' | null>(null);
   const [holdings, setHoldings] = useState<UserTokenHolding[]>([]);
-  const [quote, setQuote] = useState<SwapQuote | null>(null);
+  const [route, setRoute] = useState<RouteQuote | null>(null);
   const [quoteError, setQuoteError] = useState('');
   const [quoteStale, setQuoteStale] = useState(false);
   const [quoteTick, setQuoteTick] = useState(0);
@@ -171,22 +187,13 @@ export function Swap() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const quoteRequest = useRef(0);
 
-  // The AMM only routes token <-> ASE. When a token is the pay side, ASE is
-  // the only valid receive side (and the other way round), so the form can
-  // never sit on a token -> token pair that no pool can price.
+  // Keep the two sides distinct. Any token can now be swapped for any other
+  // token; when both tokens match, the receive side moves to another asset.
   useEffect(() => {
     if (!pools.data && !asedexPools.data) return;
-    if (!tokenIn.isNative) {
-      if (!tokenOut || !tokenOut.isNative) setTokenOut(ASE_TOKEN);
-      return;
+    if (!tokenOut || tokenOut.address.toLowerCase() === tokenIn.address.toLowerCase()) {
+      setTokenOut(tokenIn.isNative ? (universe.tokens[0] ?? null) : ASE_TOKEN);
     }
-    if (tokenOut && !tokenOut.isNative) {
-      const known = universe.tokens.some(
-        (token) => token.address === tokenOut.address && token.venue === tokenOut.venue,
-      );
-      if (known) return;
-    }
-    setTokenOut(universe.tokens[0] ?? null);
   }, [pools.data, asedexPools.data, universe.tokens, tokenOut, tokenIn]);
 
   useEffect(() => {
@@ -223,13 +230,6 @@ export function Swap() {
     void loadHistory();
   }, [loadHistory]);
 
-  const pool = useMemo(() => {
-    if (!tokenOut) return null;
-    if (tokenIn.isNative) return tokenOut.isNative ? null : tokenOut;
-    if (tokenOut.isNative) return tokenIn;
-    return null;
-  }, [tokenIn, tokenOut]);
-
   const amountIn = useMemo(() => {
     try {
       return parseUnits(amount || '0', tokenIn.decimals);
@@ -238,34 +238,34 @@ export function Swap() {
     }
   }, [amount, tokenIn.decimals]);
 
+  const sameToken = Boolean(tokenOut && tokenIn.address.toLowerCase() === tokenOut.address.toLowerCase());
+
   useEffect(() => {
     const request = ++quoteRequest.current;
-    if (!pool || amountIn <= 0n || !tokenOut) {
-      setQuote(null);
+    if (!tokenOut || amountIn <= 0n || sameToken) {
+      setRoute(null);
       setQuoteError('');
       setQuoting(false);
       return;
     }
     setQuoting(true);
     const timer = window.setTimeout(() => {
-      quoteSwap({ tokenIn, tokenOut, amountIn, pool, slippageBps })
+      findRoute(tokenIn, tokenOut, amountIn, { tokens: universe.tokens, slippageBps })
         .then((next) => {
           if (quoteRequest.current !== request) return;
-          setQuote(next);
+          setRoute(next);
           setQuoteStale(false);
           setQuoteError('');
         })
         .catch((err: unknown) => {
           if (quoteRequest.current !== request) return;
           const raw = err instanceof Error ? err.message : String(err);
-          const busy = /non-JSON|busy|502|504|timed out|network|fetch|no response/i.test(raw);
-          setQuoteError(busy
+          const transient = /non-JSON|busy|502|504|timed out|network|fetch|no response/i.test(raw);
+          setQuoteError(transient
             ? 'The Asentum node is busy right now. The last quote is kept and a retry runs automatically.'
             : raw);
           setQuoteStale(true);
-          if (busy) {
-            // Keep the last good number on screen and retry, instead of making
-            // the pair look unpriced because of one gateway hiccup.
+          if (transient) {
             window.setTimeout(() => {
               if (quoteRequest.current === request) setQuoteTick((value) => value + 1);
             }, 4000);
@@ -274,14 +274,13 @@ export function Swap() {
         .finally(() => {
           if (quoteRequest.current === request) setQuoting(false);
         });
-    }, 450);
+    }, 400);
     return () => window.clearTimeout(timer);
-  }, [pool, amountIn, tokenIn, tokenOut, slippageBps, quoteTick]);
+  }, [tokenIn, tokenOut, amountIn, slippageBps, universe.tokens, sameToken, quoteTick]);
 
   const walletBalanceIn = balanceOf(holdings, tokenIn);
   const insufficient = amountIn > 0n && amountIn > walletBalanceIn;
-  const sameToken = Boolean(tokenOut && tokenIn.address.toLowerCase() === tokenOut.address.toLowerCase() && tokenIn.venue === tokenOut.venue);
-  const canSwap = Boolean(wallet.connected && pool && tokenOut && quote && amountIn > 0n && !insufficient && !busy && !sameToken);
+  const canSwap = Boolean(wallet.connected && tokenOut && route && amountIn > 0n && !insufficient && !busy && !sameToken);
 
   const setSlippage = (next: number) => {
     const clamped = Math.min(5000, Math.max(1, Math.round(next)));
@@ -289,48 +288,34 @@ export function Swap() {
     try { window.localStorage.setItem(SLIPPAGE_KEY, String(clamped)); } catch { /* storage unavailable */ }
   };
 
-  const flip = () => {
-    if (!tokenOut) {
-      if (universe.tokens[0]) setTokenOut(universe.tokens[0]);
-      return;
-    }
-    // Only a token <-> ASE pair can be flipped; two tokens cannot both have
-    // the native side.
-    if (tokenIn.isNative === tokenOut.isNative) return;
-    const nextIn = tokenOut;
-    const nextOut = tokenIn;
-    setTokenIn(nextIn);
-    setTokenOut(nextOut);
-    setAmount('');
-    setQuote(null);
+  const resetQuote = () => {
+    setRoute(null);
     setQuoteError('');
     setQuoteStale(false);
     setMessage('');
     setError('');
   };
 
+  const flip = () => {
+    if (!tokenOut) return;
+    const nextIn = tokenOut;
+    setTokenIn(nextIn);
+    setTokenOut(tokenIn);
+    setAmount('');
+    resetQuote();
+  };
+
   const pickToken = (token: SwapToken) => {
     if (picker === 'in') {
-      if (token.isNative) {
-        setTokenIn(ASE_TOKEN);
-        if (!tokenOut || tokenOut.isNative) setTokenOut(universe.tokens[0] ?? null);
-      } else {
-        setTokenIn(token);
-        setTokenOut(ASE_TOKEN);
-      }
-    } else if (token.isNative) {
-      if (!tokenIn.isNative) setTokenIn(ASE_TOKEN);
+      if (tokenOut && tokenOut.address.toLowerCase() === token.address.toLowerCase()) setTokenOut(tokenIn);
+      setTokenIn(token);
     } else {
+      if (tokenIn.address.toLowerCase() === token.address.toLowerCase()) setTokenIn(tokenOut ?? ASE_TOKEN);
       setTokenOut(token);
-      if (!tokenIn.isNative) setTokenIn(ASE_TOKEN);
     }
     setPicker(null);
     setAmount('');
-    setQuote(null);
-    setQuoteError('');
-    setQuoteStale(false);
-    setMessage('');
-    setError('');
+    resetQuote();
   };
 
   const setMax = () => {
@@ -343,59 +328,63 @@ export function Swap() {
   };
 
   const runSwap = async () => {
-    if (!wallet.connected || !wallet.address || !pool || !tokenOut) return;
+    if (!wallet.connected || !wallet.address || !tokenOut) return;
     setBusy(true);
     setError('');
     setMessage('');
     setTxHash('');
     try {
       const ownerHex = toHexAddress(wallet.address);
-      setStage('Refreshing the AMM quote…');
-      // Re-quote immediately before signing so the minimum output is current.
-      const fresh = await quoteSwap({ tokenIn, tokenOut, amountIn, pool, slippageBps });
+      setStage('Refreshing the best route…');
+      // Route and guard are re-read immediately before signing.
+      const fresh = await findRoute(tokenIn, tokenOut, amountIn, { tokens: universe.tokens, slippageBps });
       if (fresh.minOut <= 0n) throw new Error('The fresh quote returned a zero minimum. Reduce the amount and try again.');
 
-      setStage(tokenIn.isNative ? 'Confirm the swap in your wallet' : 'Checking allowance…');
-      const result = await executeSwap({
+      const result = await executeRoute({
         client,
         ownerHex,
-        tokenIn,
-        pool,
-        amountIn,
-        minOut: fresh.minOut,
+        route: fresh,
+        tokens: universe.tokens,
+        slippageBps,
         onStage: setStage,
       });
-      setTxHash(result.hash);
-      saveSwap(wallet.address, {
-        hash: result.hash,
-        approvalHash: result.approvalHash,
-        wallet: wallet.address,
-        timestamp: Date.now(),
-        poolId: pool.poolId,
-        venue: pool.venue,
-        tokenIn: { address: tokenIn.address, symbol: tokenIn.symbol, decimals: tokenIn.decimals },
-        tokenOut: { address: tokenOut.address, symbol: tokenOut.symbol, decimals: tokenOut.decimals },
-        amountIn: amountIn.toString(),
-        quotedOut: fresh.amountOut.toString(),
-        minOut: fresh.minOut.toString(),
-        status: 'pending',
+      const owner = wallet.address;
+      setTxHash(result.hashes[result.hashes.length - 1] ?? '');
+      setStage('Recording the swap…');
+
+      // One history row per on-chain leg, so a routed swap is fully traceable.
+      fresh.legs.forEach((leg, index) => {
+        const hash = result.hashes[index];
+        if (!hash) return;
+        const executed = result.legs[index];
+        const received = executed?.received ?? leg.quote.amountOut;
+        const spent = executed?.amountIn ?? leg.quote.amountIn;
+        saveSwap(owner, {
+          hash,
+          approvalHash: result.legs[index]?.approvalHash,
+          wallet: owner,
+          timestamp: Date.now(),
+          poolId: executed?.poolId ?? leg.pool.poolId,
+          venue: executed?.venue ?? leg.pool.venue,
+          tokenIn: { address: leg.tokenIn.address, symbol: leg.tokenIn.symbol, decimals: leg.tokenIn.decimals },
+          tokenOut: { address: leg.tokenOut.address, symbol: leg.tokenOut.symbol, decimals: leg.tokenOut.decimals },
+          amountIn: spent.toString(),
+          quotedOut: leg.quote.amountOut.toString(),
+          minOut: leg.quote.minOut.toString(),
+          status: 'confirmed',
+          amountOut: received.toString(),
+        });
       });
-      setStage('Waiting for confirmation…');
-      const receipt = await client.waitReceipt(result.hash, 180_000);
-      if (!receipt.success) {
-        throw new Error('The swap reverted on chain. Your token balance was not changed by this swap.');
-      }
-      // Prefer the amount the receipt reports over the pre-signing estimate.
-      const received = await readSwappedAmount(receipt as unknown as Record<string, unknown>).catch(() => null);
-      const actualOut = received !== null && received > 0n ? received : fresh.amountOut;
-      updateSwap(wallet.address, result.hash, {
-        status: 'confirmed',
-        amountOut: actualOut.toString(),
-      });
-      setMessage(`Swap confirmed · ${formatUnits(actualOut, tokenOut.decimals, 6)} ${tokenOut.symbol} received`);
+
+      const received = result.received ?? fresh.amountOut;
+      setMessage(
+        `${formatUnits(received, tokenOut.decimals, 6)} ${tokenOut.symbol} received${
+          fresh.legs.length > 1 ? ` · routed via ${routeLabel(fresh)}` : ''
+        }`,
+      );
       setStage('');
       setAmount('');
-      setQuote(null);
+      setRoute(null);
       pools.refresh();
       asedexPools.refresh();
       if (wallet.address) {
@@ -416,7 +405,6 @@ export function Swap() {
             : raw;
       setError(friendly);
       if (txHash && wallet.address) {
-        // The transaction exists; its receipt is what decides the outcome.
         void reconcileSwaps(wallet.address).then(setHistory).catch(() => {});
       }
     } finally {
@@ -430,9 +418,9 @@ export function Swap() {
     if (!tokenOut) return 'Choose a token';
     if (sameToken) return 'Choose a different pair';
     if (!amount || amountIn <= 0n) return 'Enter an amount';
-    if (quoting) return 'Quoting…';
+    if (quoting) return 'Finding the best route…';
     if (insufficient) return `Insufficient ${tokenIn.symbol}`;
-    if (quoteError && !quote) return 'No quote for this pair';
+    if (quoteError && !route) return 'No route for this pair';
     if (busy) return stage || 'Working…';
     return `Swap ${tokenIn.symbol} for ${tokenOut.symbol}`;
   })();
@@ -445,10 +433,11 @@ export function Swap() {
     if (canSwap) void runSwap();
   };
 
-  const spotPrice = pool ? pool.spotAse : 0;
-  const nativeReserve = pool ? BigInt(pool.reserveNative) : 0n;
-  const tokenReserve = pool ? BigInt(pool.reserveToken) : 0n;
   const heldTokens = holdings.filter((holding) => !holding.isNative && holding.balanceNum > 0);
+  const rate = route && tokenOut
+    ? Number(formatUnits(route.amountOut, tokenOut.decimals, 8).replace(/,/g, ''))
+      / Math.max(1e-18, Number(formatUnits(route.amountIn, tokenIn.decimals, 8).replace(/,/g, '')))
+    : null;
 
   return (
     <>
@@ -456,18 +445,20 @@ export function Swap() {
         <div className="swap-head-grid">
           <div>
             <span className="label">Swap · Asentum testnet</span>
-            <h1 className="detail-title">Swap through the live AMM.</h1>
-            <p className="section-note" style={{ maxWidth: 560, marginTop: 18 }}>
-              Route a trade through the Auras or AseDex pools that Strata bots already use. The quote is read from
-              the pool contract, the allowance is checked before signing, and the swap carries a minimum-output
-              guard you choose.
+            <h1 className="detail-title">Swap at the best price.</h1>
+            <p className="section-note" style={{ maxWidth: 560, marginTop: 16 }}>
+              Strata quotes every live pool on Auras and AseDex, then executes the route that pays the most.
+              Token-to-token trades route through ASE automatically.
             </p>
+            <Link className="btn btn-ghost btn-sm" to="/advanced" style={{ marginTop: 14 }}>
+              Charts &amp; advanced orders →
+            </Link>
           </div>
           <dl className="swap-net">
             <div><dt>Network</dt><dd>Asentum · chain 1423</dd></div>
-            <div><dt>Finalized block</dt><dd className="mono">{heads.data ? heads.data.finalized.toLocaleString('en-US') : '—'}</dd></div>
-            <div><dt>Wallet</dt><dd>{wallet.connected ? 'Connected' : 'Not connected'}</dd></div>
+            <div><dt>Block</dt><dd className="mono">{heads.data ? heads.data.finalized.toLocaleString('en-US') : '—'}</dd></div>
             <div><dt>Live pools</dt><dd className="mono">{fmtNum((pools.data?.length ?? 0) + (asedexPools.data?.length ?? 0))}</dd></div>
+            <div><dt>Router</dt><dd>Best of both AMMs</dd></div>
           </dl>
         </div>
       </section>
@@ -479,8 +470,10 @@ export function Swap() {
               <div className="swap-frame-head">
                 <span className="label">Exchange</span>
                 <div className="swap-frame-tools">
-                  <span className="mono swap-venue-tag">{pool ? (pool.venue === 'asedex' ? 'AseDex' : 'Auras') : '—'}</span>
-                  <span className="mono swap-fee-tag">fee {((pool?.feeBps ?? 30) / 100).toFixed(2)}%</span>
+                  <span className="mono swap-venue-tag">{route ? routeLabel(route) : 'Auto route'}</span>
+                  <span className="mono swap-fee-tag">
+                    {route ? `${route.legs.length} hop${route.legs.length > 1 ? 's' : ''}` : '—'}
+                  </span>
                 </div>
               </div>
 
@@ -527,53 +520,56 @@ export function Swap() {
                 </div>
                 <div className="swap-input-row">
                   <output className="swap-output mono">
-                    {quoting
+                    {quoting && !route
                       ? '…'
-                      : quote && tokenOut
-                        ? formatUnits(quote.amountOut, tokenOut.decimals, 8)
+                      : route && tokenOut
+                        ? formatUnits(route.amountOut, tokenOut.decimals, 8)
                         : '0.0'}
                   </output>
                   <button
                     type="button"
                     className="swap-token-btn"
-                    onClick={() => { if (tokenIn.isNative) setPicker('out'); }}
-                    disabled={!tokenIn.isNative}
-                    title={tokenIn.isNative ? 'Choose the token to receive' : 'Paying with a token always pays out in ASE'}
+                    onClick={() => setPicker('out')}
                   >
                     {tokenOut
                       ? <><TokenMark symbol={tokenOut.symbol} isNative={tokenOut.isNative} /><strong>{tokenOut.symbol}</strong></>
-                      : <strong>ASE</strong>}
-                    {tokenIn.isNative && <span aria-hidden="true">▾</span>}
+                      : <strong>Choose</strong>}
+                    <span aria-hidden="true">▾</span>
                   </button>
                 </div>
+                {route && tokenOut && (
+                  <p className="swap-receive-note">
+                    Best route: <strong>{routeLabel(route)}</strong>
+                    {route.legs.length > 1 ? ' · via ASE' : ''}
+                    {route.compared > 1 ? ` · compared ${route.compared} pools` : ''}
+                  </p>
+                )}
               </div>
 
               <dl className="swap-details">
                 <div>
                   <dt>Rate</dt>
                   <dd className="mono">
-                    {quote && tokenOut
-                      ? `1 ${tokenIn.symbol} = ${quote.rate.toLocaleString('en-US', { maximumFractionDigits: 8 })} ${tokenOut.symbol}`
+                    {rate !== null && tokenOut
+                      ? `1 ${tokenIn.symbol} = ${rate.toLocaleString('en-US', { maximumFractionDigits: 8 })} ${tokenOut.symbol}`
                       : '—'}
                   </dd>
                 </div>
                 <div>
                   <dt>Minimum received</dt>
                   <dd className="mono">
-                    {quote && tokenOut ? `${formatUnits(quote.minOut, tokenOut.decimals, 8)} ${tokenOut.symbol}` : '—'}
+                    {route && tokenOut ? `${formatUnits(route.minOut, tokenOut.decimals, 8)} ${tokenOut.symbol}` : '—'}
                   </dd>
                 </div>
                 <div>
                   <dt>Price impact</dt>
-                  <dd className={`mono ${quote && quote.priceImpactPct > 3 ? 'down' : quote && quote.priceImpactPct > 1 ? 'warn' : ''}`}>
-                    {quote ? `${quote.priceImpactPct.toFixed(2)}%` : '—'}
+                  <dd className={`mono ${route && route.priceImpactPct > 3 ? 'down' : route && route.priceImpactPct > 1 ? 'warn' : ''}`}>
+                    {route ? `${route.priceImpactPct.toFixed(2)}%` : '—'}
                   </dd>
                 </div>
                 <div>
-                  <dt>Trading fee</dt>
-                  <dd className="mono">
-                    {quote ? `${formatUnits(quote.feeAmount, tokenIn.decimals, 6)} ${tokenIn.symbol}` : '—'}
-                  </dd>
+                  <dt>Route</dt>
+                  <dd className="mono">{route ? routeLabel(route) : 'Auto'}</dd>
                 </div>
               </dl>
 
@@ -615,13 +611,13 @@ export function Swap() {
               </button>
 
               {quoteError && (
-                <p className={quoteStale && quote ? 'swap-note warn' : 'swap-note down'}>
+                <p className={quoteStale && route ? 'swap-note warn' : 'swap-note down'}>
                   {quoteError}
                 </p>
               )}
-              {quote && quoteStale && (
+              {route && quoteStale && (
                 <p className="swap-note muted">
-                  This rate is the last value the pool returned. The swap re-reads the pool before you sign.
+                  This is the last value the pools returned. Every leg is re-quoted before you sign.
                 </p>
               )}
               {insufficient && !quoteError && (
@@ -724,25 +720,30 @@ export function Swap() {
 
           <aside className="swap-aside">
             <div className="swap-aside-block">
-              <span className="label">Selected pool</span>
-              {pool ? (
-                <>
-                  <div className="swap-pool-head">
-                    <TokenMark symbol={pool.symbol} isNative={pool.isNative} />
-                    <div>
-                      <strong>{pool.symbol} / ASE</strong>
-                      <span className="mono muted">{pool.venue === 'asedex' ? 'AseDex' : 'Auras'} · pool #{pool.poolId}</span>
+              <span className="label">Best route</span>
+              {route ? (
+                <div className="swap-route">
+                  {route.legs.map((leg, index) => (
+                    <div className="swap-route-hop" key={`${leg.pool.venue}-${leg.pool.poolId}-${index}`}>
+                      <span className="swap-route-index mono">{index + 1}</span>
+                      <div>
+                        <strong>{leg.tokenIn.symbol} → {leg.tokenOut.symbol}</strong>
+                        <span className="mono muted">
+                          {leg.pool.venue === 'asedex' ? 'AseDex' : 'Auras'} · pool #{leg.pool.poolId} · {formatUnits(leg.quote.amountOut, leg.tokenOut.decimals, 6)} {leg.tokenOut.symbol}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                  <dl className="swap-pool-stats">
-                    <div><dt>1 {pool.symbol}</dt><dd className="mono">{spotPrice.toFixed(6)} ASE</dd></div>
-                    <div><dt>ASE liquidity</dt><dd className="mono">{weiToAse(nativeReserve, 2)}</dd></div>
-                    <div><dt>Token liquidity</dt><dd className="mono">{formatUnits(tokenReserve, pool.decimals, 2)}</dd></div>
-                    <div><dt>Fee</dt><dd className="mono">{(pool.feeBps / 100).toFixed(2)}%</dd></div>
-                  </dl>
-                </>
+                  ))}
+                  {route.runnerUp && (
+                    <p className="muted swap-aside-note">
+                      Kept the better price; the other venue would have paid{' '}
+                      {formatUnits(route.runnerUp.amountOut, route.legs[route.legs.length - 1].tokenOut.decimals, 6)}{' '}
+                      {route.legs[route.legs.length - 1].tokenOut.symbol}.
+                    </p>
+                  )}
+                </div>
               ) : (
-                <p className="muted">Pick one token and ASE to see the pool that will price the trade.</p>
+                <p className="muted">Enter an amount to see the winning venue, pool and hops.</p>
               )}
             </div>
 
@@ -761,9 +762,9 @@ export function Swap() {
                         onClick={() => {
                           if (!token) return;
                           setTokenIn(token);
-                          setTokenOut(ASE_TOKEN);
+                          if (tokenOut?.address.toLowerCase() === token.address.toLowerCase()) setTokenOut(ASE_TOKEN);
                           setAmount('');
-                          setQuote(null);
+                          resetQuote();
                         }}
                       >
                         <span>{holding.symbol}</span>
@@ -779,14 +780,14 @@ export function Swap() {
             )}
 
             <div className="swap-aside-block">
-              <span className="label">Before you sign</span>
+              <span className="label">How it executes</span>
               <ul className="swap-checklist">
-                <li>The quote is read from the pool contract, not from a price feed.</li>
-                <li>A token sale asks for an ARC-20 approval first, then the swap.</li>
-                <li>Your minimum output is enforced on chain; the swap reverts if the pool moves past it.</li>
-                <li>Strata never holds your keys and never sends a transaction without your wallet confirmation.</li>
+                <li>Both AMMs are quoted for every hop; the larger output wins.</li>
+                <li>Token pairs without a direct pool route through ASE in two swaps.</li>
+                <li>Each leg carries its own on-chain minimum-output guard.</li>
+                <li>Strata never holds keys and never sends a transaction without your wallet confirmation.</li>
               </ul>
-              <Link className="link-arrow" to="/how">How execution works →</Link>
+              <Link className="link-arrow" to="/how">Read the execution guide →</Link>
             </div>
           </aside>
         </div>
@@ -795,7 +796,7 @@ export function Swap() {
       <TokenPicker
         open={picker !== null}
         title={picker === 'out' ? 'Receive token' : 'Pay with'}
-        tokens={picker === 'out' ? universe.tokens : allTokens}
+        tokens={pickerTokens}
         holdings={holdings}
         exclude={picker === 'out' ? tokenIn.address : tokenOut?.address}
         onSelect={pickToken}

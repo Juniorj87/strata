@@ -303,6 +303,18 @@ export function StrategyDetail() {
               >
                 {actionBusy ? 'Closing…' : needsStop ? 'Close bot & return funds' : hasBalance ? 'Withdraw everything' : 'Nothing to withdraw'}
               </button>
+              {knownStopped && !hasBalance && localMatch && wallet.address && (
+                <button
+                  className="btn btn-ghost"
+                  type="button"
+                  onClick={() => {
+                    removeUserStrategy(localMatch.address, wallet.address ?? undefined);
+                    navigate('/portfolio');
+                  }}
+                >
+                  Remove from my bots
+                </button>
+              )}
             </div>
           )
         ) : (
@@ -429,7 +441,7 @@ export function StrategyDetail() {
         <div className="panels">
           <div style={{ display: 'grid', gap: 16 }}>
             <details className="dev-accordion">
-              <summary>Technical data · contract source, events and schedule (Pro)</summary>
+              <summary>Technical data · contract source, events and schedule</summary>
               <div className="panel-body">
                 <dl className="kv">
                   <dt>Pool</dt><dd>{strategy.poolId ? `#${strategy.poolId}` : '-'}</dd>

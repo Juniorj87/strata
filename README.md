@@ -15,7 +15,7 @@
 **Strata** is an autonomous trading protocol where strategies run directly on the blockchain as smart contracts rather than fragile off-chain bots.
 Deployed once, scheduled by the blockchain protocol itself, and verified through public on-chain source code.
 
-[🌐 Open Web App](https://strata-dapp.vercel.app) · [Protocol Contracts](#-system-contracts--network) · [How It Works](#-how-it-works) · [Trading Mechanisms](#-core-mechanisms) · [Security & Privacy](#-privacy-and-user-protection)
+[🌐 Open Web App](https://stratadex.site) · [Protocol Contracts](#-system-contracts--network) · [How It Works](#-how-it-works) · [Strategy Templates](#-core-strategy-archetypes) · [Security & Privacy](#-privacy-and-user-protection)
 
 </div>
 
@@ -111,7 +111,7 @@ Strata interacts with the following verified protocol contracts on the **Asentum
 
 ## 📊 Core Strategy Archetypes
 
-The current app exposes eight on-chain templates. The five guided templates are available in Lite; the remaining three are Pro-only.
+The app ships eight on-chain templates. Five trader-facing presets are available in the bot builder; the remaining three stay available in the contract catalog and the strategy contracts themselves.
 
 | Strategy | Default cadence | Direction / behaviour | Funding |
 |---|---:|---|---|
@@ -139,7 +139,11 @@ The live application at [**stratadex.site**](https://stratadex.site) provides a 
 
 ![Strata Dashboard](docs/screenshots/home.png)
 
-### 2. Advanced Trading
+### 2. Best-Price Swap & Advanced Trading
+
+The Swap screen quotes every live pool on both Auras and AseDex, then executes the route that pays the most. Token-to-token trades route through ASE automatically, and each hop carries its own on-chain minimum-output guard.
+
+![Strata Swap](docs/screenshots/swap.png)
 
 The Spot ticket supports Market, supported Auras v2 escrowed Limit orders, and Bot mode. Bot mode deploys an existing spot strategy contract for the selected pool. Stop-loss/take-profit are scheduled spot exit conditions, not Perps positions. Chart controls include EMA 20/50 and locally saved horizontal price levels. Perps (long/short, leverage, margin and liquidation) remain a separate unavailable integration until a real venue publishes its contract/API. This is not an AseDex-only limitation: both Auras and AseDex are spot AMMs, not derivatives engines.
 
@@ -148,21 +152,35 @@ The Spot ticket supports Market, supported Auras v2 escrowed Limit orders, and B
 - Market orders are quoted by the AMM contract and signed by the wallet with a minimum-output guard.
 - Limit orders are genuine escrowed Auras v2 orders (`createLimitOrder` / `cancelLimitOrder`), filled against the pool by cron. They are not presented as an order book, and AseDex / legacy Auras v1 pools are market-order only because the module is deployed beside Auras v2.
 - Every chart and price is normalised to ASE per token, including pools where ASE is token0.
-- Open orders, balances and the live trade tape are read from chain state / the Auras indexer. The selected on-chain pool ID and venue are carried into the bot builder so a bot can be created for the market being viewed.\n- Perpetuals show an explicit "not connected" status; no perp price or position is simulated.
+- Open orders, balances and the live trade tape are read from chain state / the Auras indexer. The selected on-chain pool ID and venue are carried into the bot builder so a bot can be created for the market being viewed.
+- Perpetuals show an explicit "not connected" status; no perp price or position is simulated.
+
+![Strata Advanced Trading](docs/screenshots/advanced.png)
 
 ### 3. Create Token
 - Deploys a fixed-supply ARC-20 contract, then calls `init` once to mint the supply to the deployer.
 - Shows the contract address, both transaction hashes and a chain-read verification of name, symbol, decimals and supply.
 - A failed initialisation resumes against the same deployed address instead of deploying a second token.
 
-### 4. Strategy Registry & Hash Verifier
+### 4. Bot Builder, Strategy Registry & Hash Verifier
+- One guided builder for the five trader-facing bots: DCA, take-profit, grid, stop-loss and TWAP.
 - Automatic discovery of on-chain strategy contracts carrying the Strata signature.
 - Instant client-side **BLAKE3 source code verification** against on-chain bytecode hashes.
 - Real-time monitoring of contract token balances, remaining gas escrow, and execution history.
+- Portfolio can finish an interrupted token deposit on an already initialized contract instead of deploying a duplicate.
 
-![Strata Strategy Registry](docs/screenshots/deploy.png)
+![Strata Bot Builder](docs/screenshots/deploy.png)
 
-### 5. Interactive Mechanics & Visualizer (`/how`)
+![Strata Strategy Catalog](docs/screenshots/strategies.png)
+
+### 5. Portfolio & Position Tracking
+- Wallet balances, capital committed to bots, realised proceeds and local transaction history.
+- Bots grouped by lifecycle state: running, funded, needs setup and stopped.
+- Close a bot to cancel its schedule and return ASE and tokens; unfinished contracts can be removed from the local list without touching the chain.
+
+![Strata Portfolio](docs/screenshots/portfolio.png)
+
+### 6. Interactive Mechanics & Visualizer (`/how`)
 - Interactive threshold simulator demonstrating how price drift triggers `buy` / `hold` / `sell` signals in real time.
 - Documentation of Asentum VM execution limits and cross-contract calling rules (`E()` primitives).
 
@@ -184,13 +202,11 @@ The Spot ticket supports Market, supported Auras v2 escrowed Limit orders, and B
 
 ---
 
-## 🧰 Local development
+## 🧪 Verification
 
-Requirements: Node.js 22+ and npm.
+The repository ships repeatable checks instead of manual server setup:
 
 ```bash
-npm ci
-npm run dev
 npm run typecheck
 npm run lint
 npm run build
@@ -198,7 +214,9 @@ npm run test:strategies
 npm run test:trading
 ```
 
-The frontend is a static Vite/React app. It reads Asentum and market-indexer data from the browser and delegates transaction signing to the connected Asentum wallet. Live-chain transaction checks require testnet access and explicit wallet approval.
+`test:strategies` checks template upgrades and contract invariants. `test:trading` simulates complete strategy lifecycles, including fills, budget exhaustion and scheduled exits. Live-chain transaction checks still require testnet access and explicit wallet approval.
+
+The frontend is a static Vite/React client. It reads Asentum and market-indexer data directly from the browser and delegates signing to the connected Asentum wallet. There is no backend, database or server-side wallet state.
 
 For current feature behaviour and limitations, see [docs/PRODUCT_GUIDE.md](docs/PRODUCT_GUIDE.md). For system boundaries and data flow, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
-import { loadPools, loadAseDexPools, loadStrategies, type LivePool } from '../lib/registry';
+import { loadPools, loadAseDexPools, loadLocalStrategies, type LivePool } from '../lib/registry';
 import { explorerAddressUrl, explorerTxUrl, toAse1, toHexAddress } from '../lib/rpc';
-import { fmtWei, shortAddr, weiToAse } from '../lib/format';
-import { botTypeFor } from '../lib/templates';
+import { fmtWei, formatUnits, parseUnits, shortAddr, weiToAse } from '../lib/format';
+import { botTypeFor, templateById } from '../lib/templates';
 import { closeBot } from '../lib/botLifecycle';
 import { WalletRegistryPanel } from '../components/WalletRegistryPanel';
 import {
@@ -112,14 +112,15 @@ export function Portfolio() {
   const [loadingHoldings, setLoadingHoldings] = useState(false);
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [stopping, setStopping] = useState<string | null>(null);
+  const [depositing, setDepositing] = useState<string | null>(null);
   const [listTick, setListTick] = useState(0);
   const [botNotice, setBotNotice] = useState<Record<string, { kind: 'ok' | 'err'; text: string }>>({});
 
   const pools = useAsync(() => loadPools(), 60_000);
   const asedexPools = useAsync(() => loadAseDexPools(), 60_000);
   const liveStrategies = useAsync(
-    () => loadStrategies(wallet.address ?? undefined),
-    25000,
+    () => loadLocalStrategies(wallet.address ?? undefined),
+    60_000,
     true,
     wallet.address,
   );
@@ -217,6 +218,91 @@ export function Portfolio() {
     }
   };
 
+  // A launch can stop between init() and the token transfer. The contract is
+  // armed but empty, so finish that one step instead of deploying a duplicate.
+  const finishDeposit = async (record: DeployedStrategyRecord) => {
+    if (!wallet.connected || !wallet.address) {
+      wallet.openConnect();
+      return;
+    }
+    if (!record.tokenAddress || !record.budget) return;
+    const notice = (kind: 'ok' | 'err', text: string) =>
+      setBotNotice((prev) => ({ ...prev, [record.address]: { kind, text } }));
+    setDepositing(record.address);
+    notice('ok', 'Checking the bot and your token balance…');
+    try {
+      const pool = allPools.find(
+        (item) => item.id === record.poolId && item.token.toLowerCase() === record.tokenAddress.toLowerCase(),
+      ) ?? allPools.find((item) => item.token.toLowerCase() === record.tokenAddress.toLowerCase());
+      let decimals = pool?.decimals;
+      if (decimals === undefined) {
+        decimals = Number(await client.view<string | number>(record.tokenAddress, 'decimals', []));
+      }
+      if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+        throw new Error('The token decimals could not be read from chain.');
+      }
+      const required = parseUnits(record.budget, decimals);
+      if (required <= 0n) throw new Error('This bot has no token budget to deposit.');
+
+      const rawHeld = await client.view<string>(record.tokenAddress, 'balanceOf', [record.address]);
+      const held = BigInt(String(rawHeld).replace(/"/g, '') || '0');
+      if (held >= required) {
+        saveUserStrategy({ ...record, status: 'funded' });
+        notice('ok', 'The tokens are already in the bot. It is ready to run.');
+        setListTick((value) => value + 1);
+        liveStrategies.refresh();
+        return;
+      }
+      const missing = required - held;
+
+      const rawWallet = await client.view<string>(record.tokenAddress, 'balanceOf', [wallet.address]);
+      const walletHeld = BigInt(String(rawWallet).replace(/"/g, '') || '0');
+      if (walletHeld < missing) {
+        throw new Error(
+          `Your wallet does not have enough ${record.tokenSymbol}. ` +
+          `Needed: ${formatUnits(missing, decimals)} ${record.tokenSymbol}. ` +
+          `Available: ${formatUnits(walletHeld, decimals)} ${record.tokenSymbol}.`,
+        );
+      }
+
+      notice('ok', `Confirm the deposit of ${formatUnits(missing, decimals)} ${record.tokenSymbol}…`);
+      const hash = await client.call(record.tokenAddress, 'transfer', [record.address, missing.toString()]);
+      saveUserTx(wallet.address, {
+        hash,
+        type: 'fund',
+        description: `Deposit ${record.budget} ${record.tokenSymbol} into strategy contract`,
+        timestamp: Date.now(),
+        status: 'pending',
+        strategyAddress: record.address,
+      });
+      const receipt = await client.waitReceipt(hash, 120000);
+      if (!receipt.success) throw new Error(`The deposit transaction reverted. Contract: ${record.address}.`);
+      saveUserTx(wallet.address, {
+        hash,
+        type: 'fund',
+        description: `Deposit ${record.budget} ${record.tokenSymbol} into strategy contract`,
+        timestamp: Date.now(),
+        status: 'confirmed',
+        strategyAddress: record.address,
+      });
+      saveUserStrategy({ ...record, status: 'funded', transferTxHash: hash });
+      notice('ok', `${record.budget} ${record.tokenSymbol} deposited. The bot is funded and armed.`);
+      setListTick((value) => value + 1);
+      liveStrategies.refresh();
+      void refreshHoldings();
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      const text = /reject|denied|cancel|declin/i.test(raw)
+        ? 'The wallet rejected the transaction. Nothing was changed.'
+        : /unexpected token|not valid json|<html/i.test(raw)
+          ? 'The Asentum node returned a temporary error page instead of a transaction result. Nothing was changed — wait a few seconds and press the button again.'
+          : raw;
+      notice('err', text);
+    } finally {
+      setDepositing(null);
+    }
+  };
+
   const userTxs: UserTxRecord[] = wallet.connected && wallet.address
     ? getUserTxs(wallet.address)
     : [];
@@ -284,7 +370,7 @@ export function Portfolio() {
 
   if (!wallet.connected || !wallet.address) {
     return (
-      <section className="wrap" style={{ padding: '70px 0 100px' }}>
+      <section className="wrap" style={{ paddingTop: 70, paddingBottom: 100 }}>
         <div className="detail-head" style={{ paddingTop: 0 }}>
           <span className="label">Portfolio · Asentum testnet</span>
           <h1 className="detail-title">Your capital, in one view.</h1>
@@ -579,7 +665,8 @@ export function Portfolio() {
               <div>
                 <span className="label">My bots</span>
                 <p className="muted" style={{ marginTop: 4 }}>
-                  Close a bot to cancel its schedule and send the ASE and tokens back to your wallet. Your wallet will ask you to approve each transfer.
+                  Close a bot to cancel its schedule and send the ASE and tokens back to your wallet. Finished bots can be
+                  removed from this list — removing only hides the entry in this browser, it never touches the contract.
                 </p>
               </div>
               <Link to="/deploy" className="btn btn-ghost btn-sm">
@@ -603,6 +690,20 @@ export function Portfolio() {
                     );
                     const status = statusOf(strategy.status, liveMatch);
                     const bot = botTypeFor(strategy.template);
+                    // A bot can be removed once it cannot trade again and holds
+                    // nothing. Requiring a zero balance prevents hiding a
+                    // contract that still has funds inside it.
+                    const emptyOnChain = !liveMatch
+                      || (BigInt(liveMatch.balanceAse || '0') === 0n
+                        && BigInt(liveMatch.tokenBalance || '0') === 0n);
+                    const stopped = strategy.status === 'stopped'
+                      || liveMatch?.stopped === true;
+                    const scheduleEnded = liveMatch !== undefined
+                      && liveMatch.cron === null
+                      && strategy.status !== 'deployed'
+                      && strategy.status !== 'initialized';
+                    const finished = strategy.status === 'failed'
+                      || ((stopped || scheduleEnded) && emptyOnChain);
                     return (
                       <div className="bot-card" key={strategy.address}>
                         <div className="bot-card-head">
@@ -719,7 +820,24 @@ export function Portfolio() {
                             </>
                           ) : (
                             <>
-                              <Link to={`/strategies/${strategy.address}`} className="btn btn-primary">
+                              {strategy.status === 'initialized'
+                                && strategy.tokenAddress
+                                && strategy.budget
+                                && templateById(strategy.template).trades
+                                && strategy.template !== 'dca' && (
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  disabled={depositing === strategy.address}
+                                  onClick={() => void finishDeposit(strategy)}
+                                >
+                                  {depositing === strategy.address ? 'Depositing…' : 'Deposit tokens'}
+                                </button>
+                              )}
+                              <Link
+                                to={`/strategies/${strategy.address}`}
+                                className={depositing === strategy.address ? 'btn btn-ghost' : 'btn btn-primary'}
+                              >
                                 Manage bot
                               </Link>
                               {strategy.status !== 'failed' && (
@@ -740,6 +858,16 @@ export function Portfolio() {
                                 </button>
                               )}
                             </>
+                          )}
+                          {finished && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              onClick={() => removeUnfinished(strategy)}
+                              title="Hide this finished bot from the portfolio list in this browser"
+                            >
+                              Remove from list
+                            </button>
                           )}
                           <a className="btn btn-ghost" href={explorerAddressUrl(strategy.address)} target="_blank" rel="noreferrer" style={{ flex: '0 0 auto', padding: '0 10px' }}>
                             ↗

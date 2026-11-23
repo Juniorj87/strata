@@ -14,14 +14,13 @@ import {
   type MarketPair,
 } from '../lib/marketData';
 import { computeSpot } from '../lib/registry';
+import { ASE_TOKEN, type SwapToken } from '../lib/swap';
 import {
-  ASE_TOKEN,
-  executeSwap,
-  quoteSwap,
-  readSwappedAmount,
-  type SwapQuote,
-  type SwapToken,
-} from '../lib/swap';
+  executeRoute,
+  findRoute,
+  routeLabel,
+  type RouteQuote,
+} from '../lib/router';
 import {
   cancelLimitOrder,
   createLimitOrder,
@@ -52,9 +51,6 @@ const STRATEGY_PRESETS = [
   { template: 'twap', name: 'TWAP', text: 'Split one token sale into timed swaps.', interval: 300, pro: false },
   { template: 'limit-exit', name: 'Take-profit', text: 'One scheduled sell once the pool price reaches a target.', interval: 60, pro: false },
   { template: 'risk-managed', name: 'Risk-managed exit', text: 'Spot-only scheduled sells: stop-loss, take-profit and drawdown caps.', interval: 300, pro: false },
-  { template: 'momentum-signal', name: 'Momentum signal', text: 'Publish a signal from consecutive TWAP windows; does not trade.', interval: 60, pro: true },
-  { template: 'momentum-trader', name: 'Momentum trader', text: 'Sell the selected token into ASE when the signal threshold is crossed.', interval: 60, pro: true },
-  { template: 'scale', name: 'Scale order', text: 'Sell token inventory in scheduled price-triggered slices.', interval: 60, pro: true },
 ];
 
 interface PairState {
@@ -210,7 +206,7 @@ export function AdvancedTrading() {
   const [orderKind, setOrderKind] = useState<'market' | 'limit' | 'bot'>('market');
   const [amount, setAmount] = useState('');
   const [slippageBps, setSlippageBps] = useState(50);
-  const [quote, setQuote] = useState<SwapQuote | null>(null);
+  const [quote, setQuote] = useState<RouteQuote | null>(null);
   const [quoteError, setQuoteError] = useState('');
   const [quoting, setQuoting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -250,6 +246,47 @@ export function AdvancedTrading() {
   const tokenIn = side === 'buy' ? ASE_TOKEN : baseToken;
   const tokenOut = side === 'buy' ? baseToken : ASE_TOKEN;
 
+  // Every pool that lists this token, on both AMMs. The router compares them,
+  // so a market order is not locked to the pair picked for the chart.
+  const routeUniverse = useAsync<SwapToken[]>(
+    async () => {
+      if (!token) return [];
+      const matching = pairs.filter(
+        (candidate) => pairToken(candidate)?.address.toLowerCase() === token.address.toLowerCase(),
+      );
+      const loaded = await Promise.all(matching.map(async (candidate): Promise<SwapToken | null> => {
+        const pairTokenInfo = pairToken(candidate);
+        if (!pairTokenInfo) return null;
+        const state = await loadPairState(candidate).catch(() => null);
+        if (!state) return null;
+        return {
+          address: pairTokenInfo.address,
+          symbol: pairTokenInfo.symbol || 'TOKEN',
+          name: pairTokenInfo.symbol || 'Token',
+          decimals: state.decimals,
+          isNative: false,
+          venue: candidate.dex,
+          ammAddress: candidate.amm,
+          poolId: candidate.chainPoolId,
+          reserveToken: state.reserveToken,
+          reserveNative: state.reserveNative,
+          feeBps: state.feeBps,
+          spotAse: state.spot,
+        } satisfies SwapToken;
+      }));
+      return loaded.filter((item): item is SwapToken => Boolean(item));
+    },
+    30_000,
+    Boolean(token),
+    `${token?.address ?? ''}:${pairs.length}`,
+  );
+  const routableTokens = useMemo<SwapToken[]>(
+    () => (routeUniverse.data && routeUniverse.data.length > 0
+      ? routeUniverse.data
+      : baseToken ? [baseToken] : []),
+    [routeUniverse.data, baseToken],
+  );
+
   const amountIn = useMemo(() => {
     try { return parseUnits(amount || '0', side === 'buy' ? 18 : decimals); } catch { return 0n; }
   }, [amount, side, decimals]);
@@ -280,7 +317,7 @@ export function AdvancedTrading() {
     }
     setQuoting(true);
     const timer = window.setTimeout(() => {
-      quoteSwap({ tokenIn, tokenOut, amountIn, pool: baseToken, slippageBps })
+      findRoute(tokenIn, tokenOut, amountIn, { tokens: routableTokens, slippageBps })
         .then((next) => {
           if (quoteSeq.current !== seq) return;
           setQuote(next);
@@ -296,7 +333,7 @@ export function AdvancedTrading() {
         });
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [tokenIn, tokenOut, baseToken, amountIn, slippageBps]);
+  }, [tokenIn, tokenOut, baseToken, amountIn, slippageBps, routableTokens]);
 
   const refreshMarket = () => {
     pairsState.refresh();
@@ -320,26 +357,21 @@ export function AdvancedTrading() {
       if (amountIn <= 0n) throw new Error('Enter an amount greater than zero.');
       // Always request a fresh quote here. The background quote is only a preview;
       // it must never prevent the user from attempting a trade or leave the button inert.
-      setStage('Refreshing the AMM quote…');
-      const fresh = await quoteSwap({ tokenIn, tokenOut, amountIn, pool: baseToken, slippageBps });
+      setStage('Finding the best route…');
+      const fresh = await findRoute(tokenIn, tokenOut, amountIn, { tokens: routableTokens, slippageBps });
       if (fresh.minOut <= 0n) throw new Error('The fresh quote returned a zero minimum. Reduce the amount.');
-      const result = await executeSwap({
+      const result = await executeRoute({
         client,
         ownerHex,
-        tokenIn,
-        pool: baseToken,
-        amountIn,
-        minOut: fresh.minOut,
+        route: fresh,
+        tokens: routableTokens,
+        slippageBps,
         onStage: setStage,
       });
-      setLastTx(result.hash);
-      setStage('Waiting for confirmation…');
-      const receipt = await client.waitReceipt(result.hash, 180_000);
-      if (!receipt.success) throw new Error('The swap reverted on chain. No balance changed.');
-      const received = await readSwappedAmount(receipt as unknown as Record<string, unknown>).catch(() => null);
-      const actual = received && received > 0n ? received : fresh.amountOut;
+      setLastTx(result.hashes[result.hashes.length - 1] ?? '');
+      const actual = result.received ?? fresh.amountOut;
       setNotice(
-        `${side === 'buy' ? 'Bought' : 'Sold'} · ${formatUnits(actual, tokenOut.decimals, 6)} ${tokenOut.symbol} received`,
+        `${side === 'buy' ? 'Bought' : 'Sold'} · ${formatUnits(actual, tokenOut.decimals, 6)} ${tokenOut.symbol} received · ${routeLabel(fresh)}`,
       );
       setAmount('');
       setQuote(null);
@@ -457,11 +489,10 @@ export function AdvancedTrading() {
   const perps = perpsIntegration();
   // Carry the exact selected on-chain pool into the bot builder. The indexer
   // pool key is not the contract pool id; Deploy expects chainPoolId.
-  const botUrl = (template: string, interval: number, pro = false) => {
+  const botUrl = (template: string, interval: number) => {
     const query = new URLSearchParams({
       template,
       interval: String(interval),
-      mode: pro ? 'pro' : 'lite',
     });
     if (pair?.chainPoolId) query.set('pool', pair.chainPoolId);
     query.set('chartTf', timeframe);
@@ -484,35 +515,14 @@ export function AdvancedTrading() {
         <div>
           <span className="label">Advanced Trading · Asentum testnet</span>
           <h1 className="detail-title">Trade the live AMM.</h1>
-          <p className="section-note" style={{ maxWidth: 660, marginTop: 16 }}>
-            Real indexed candles, an on-chain quote for every market order, and escrowed limit orders on the Auras
-            v2 AMM. Strata has no order-book venue connected; this screen uses AMM execution only.
+          <p className="section-note" style={{ maxWidth: 620, marginTop: 16 }}>
+            Indexed candles and on-chain execution. Market orders are routed to whichever pool on Auras or AseDex
+            pays the most.
           </p>
         </div>
         <div className="advanced-head-actions">
           <Link className="btn btn-ghost btn-sm" to="/swap">Simple swap</Link>
           <Link className="btn btn-primary btn-sm" to="/deploy">Automate this pair</Link>
-        </div>
-      </section>
-
-      <section className="wrap">
-        <div className="advanced-flow">
-          <div className="advanced-flow-item">
-            <span className="label">1 · Analyse</span>
-            <strong>Read the candles</strong>
-            <p>Pick 1m, 5m, 15m, 1h or 1d. Candles are built from indexed Swap events, so a quiet market shows gaps, not invented prices.</p>
-          </div>
-          <div className="advanced-flow-item">
-            <span className="label">2 · Execute</span>
-            <strong>Place the order</strong>
-            <p>A market order swaps against the AMM right away. A limit order is escrowed on-chain and fills only when the pool can pay its minimum.</p>
-          </div>
-          <div className="advanced-flow-item">
-            <span className="label">3 · Automate</span>
-            <strong>Hand it to a bot</strong>
-            <p>DCA, grid, TWAP, take-profit and stop-loss run as contracts on the Asentum Cron. Same pair, no tab needed.</p>
-            <Link className="home-text-link" to={botUrl('dca', 3600)}>Create a bot for this market →</Link>
-          </div>
         </div>
       </section>
 
@@ -600,10 +610,7 @@ export function AdvancedTrading() {
                 loading={candles.loading}
                 error={candles.error}
               />
-              <p className="advanced-chart-note">
-                Candles come from indexed Swap events. Empty buckets are omitted, not filled with a synthetic price.
-                Scroll to zoom and drag to pan.
-              </p>
+              <p className="advanced-chart-note">Indexed fills only · scroll to zoom · drag to pan</p>
             </div>
 
             <div className="advanced-lower-grid">
@@ -723,7 +730,7 @@ export function AdvancedTrading() {
                   <p className="field-help">Choose a Spot strategy for this pool. It runs without leverage through Asentum Cron; the selected pool and venue will be carried into the bot builder.</p>
                   <div className="advanced-bot-quick">
                     {STRATEGY_PRESETS.map((preset) => (
-                      <Link key={preset.template} to={botUrl(preset.template, preset.interval, preset.pro)} className="advanced-strategy-row">
+                      <Link key={preset.template} to={botUrl(preset.template, preset.interval)} className="advanced-strategy-row">
                         <span><strong>{preset.name}</strong><small>{preset.text}</small><small className="mono">Default execution: {preset.interval >= 3600 ? `${preset.interval / 3600}h` : `${preset.interval / 60}m`}</small></span>
                         <span aria-hidden="true">→</span>
                       </Link>
@@ -758,7 +765,7 @@ export function AdvancedTrading() {
                     <div>
                       <dt>Receive (est.)</dt>
                       <dd className="mono">
-                        {quoting ? '…' : quote && tokenOut ? `${formatUnits(quote.amountOut, tokenOut.decimals, 6)} ${tokenOut.symbol}` : '—'}
+                        {quoting && !quote ? '…' : quote && tokenOut ? `${formatUnits(quote.amountOut, tokenOut.decimals, 6)} ${tokenOut.symbol}` : '—'}
                       </dd>
                     </div>
                     <div>
@@ -768,6 +775,10 @@ export function AdvancedTrading() {
                     <div>
                       <dt>Price impact</dt>
                       <dd className="mono">{quote ? `${quote.priceImpactPct.toFixed(2)}%` : '—'}</dd>
+                    </div>
+                    <div>
+                      <dt>Best route</dt>
+                      <dd className="mono">{quote ? routeLabel(quote) : 'Auto'}</dd>
                     </div>
                   </dl>
 
@@ -945,34 +956,6 @@ export function AdvancedTrading() {
                   </div>
                 </div>
               ))}
-            </div>
-
-            <div className="panel advanced-strategy">
-              <div className="panel-head">
-                <div>
-                  <span className="label">Spot bots · on-chain strategies</span>
-                  <p className="muted">Runs on Asentum Cron · minimum interval 60s · no leverage</p>
-                </div>
-              </div>
-              <div className="advanced-strategy-list">
-                {STRATEGY_PRESETS.map((preset) => (
-                  <Link key={preset.template} to={botUrl(preset.template, preset.interval, preset.pro)} className="advanced-strategy-row">
-                    <span>
-                      <strong>{preset.name}</strong>
-                      <small>{preset.text}</small>
-                    </span>
-                    <span aria-hidden="true">→</span>
-                  </Link>
-                ))}
-              </div>
-              <p className="field-help">
-                Chart timeframe and bot execution are separate. Contracts read the pool/TWAP state when Cron fires; they do not receive chart candles. Cron's supported interval is 60–86,400 seconds, subject to the strategy contract and funded escrow.
-              </p>
-              <div className="advanced-strategy-foot">
-                <Link className="btn btn-primary btn-sm" to={botUrl('dca', 3600)}>
-                  Build a bot for this pair →
-                </Link>
-              </div>
             </div>
 
             <div className="panel advanced-perps">

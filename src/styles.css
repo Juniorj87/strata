@@ -7303,3 +7303,121 @@ main, main > *, .wrap, .panel, .card, .doc-content, .advanced-chart-col,
 .app .create-step-dot,
 .app .status-dot,
 .app .pulse-dot { border-radius: 50% !important; }
+
+/* ---------- Swap route + DeepBook-style chart ---------- */
+
+.swap-receive-note {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.swap-receive-note strong {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.swap-route {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.swap-route-hop {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  background: var(--surface-2);
+}
+
+.swap-route-hop > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.swap-route-hop strong {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.swap-route-hop .muted {
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.swap-route-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--accent-line);
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11.5px;
+}
+
+.advanced-chart-panel {
+  background: var(--bg-2);
+  border-color: var(--line-soft);
+}
+
+.advanced-chart-panel .panel-head {
+  border-bottom-color: var(--line-soft);
+}
+
+.candle-chart {
+  padding: 14px 12px 4px;
+}
+
+.candle-chart-price {
+  font-size: 24px;
+  letter-spacing: -0.02em;
+}
+
+.candle-chart-tools {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.candle-chart svg {
+  display: block;
+}
+
+/* Bot builder: explicit 3-step flow */
+.bot-flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  color: var(--dim);
+}
+
+.bot-flow span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.bot-flow b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--accent-line);
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
+}

@@ -1,4 +1,4 @@
-import { Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes } from 'react-router-dom';
 import { Shell } from './components/Shell';
 import { Home } from './pages/Home';
 import { Strategies } from './pages/Strategies';
@@ -6,7 +6,6 @@ import { StrategyDetail } from './pages/StrategyDetail';
 import { Deploy } from './pages/Deploy';
 import { How } from './pages/How';
 import { Leaderboard } from './pages/Leaderboard';
-import { Analytics } from './pages/Analytics';
 import { Activity } from './pages/Activity';
 import { Portfolio } from './pages/Portfolio';
 import { Marketplace } from './pages/Marketplace';
@@ -28,7 +27,7 @@ export default function App() {
         <Route path="/strategies/:address" element={<StrategyDetail />} />
         <Route path="/leaderboard" element={<Leaderboard />} />
         <Route path="/marketplace" element={<Marketplace />} />
-        <Route path="/analytics" element={<Analytics />} />
+        <Route path="/analytics" element={<Navigate to="/leaderboard" replace />} />
         <Route path="/activity" element={<Activity />} />
         <Route path="/how" element={<How />} />
         <Route path="*" element={<Home />} />

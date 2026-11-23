@@ -280,7 +280,11 @@ const toUnits = (value: unknown): bigint => {
 };
 
 /** Build one strategy record from chain state. */
-export async function loadStrategy(address: string, discovery: 'configured' | 'scan' | 'user' = 'configured'): Promise<LiveStrategy | null> {
+export async function loadStrategy(
+  address: string,
+  discovery: 'configured' | 'scan' | 'user' = 'configured',
+  options?: { light?: boolean },
+): Promise<LiveStrategy | null> {
   let hex: string;
   try { hex = toHexAddress(address).toLowerCase(); }
   catch { return null; }
@@ -318,7 +322,20 @@ export async function loadStrategy(address: string, discovery: 'configured' | 's
     : null;
   const jobId = status.jobId ? String(status.jobId) : null;
 
-  const accounting = await fetchStrategyAccounting(hex);
+  // The portfolio only needs status, balances and contract counters. Reading
+  // every receipt for every bot made that page wait on dozens of RPC calls.
+  const accounting = options?.light
+    ? {
+        fills: [],
+        tokenTransfers: [],
+        lifecycle: [],
+        deployBlock: null,
+        transferTotal: 0,
+        indexedFrom: 0,
+        capped: false,
+        receiptsResolved: true,
+      }
+    : await fetchStrategyAccounting(hex);
   const tokenTransfers = token
     ? accounting.tokenTransfers.filter((event) => String(event.args.token ?? '') === token!.toLowerCase())
     : accounting.tokenTransfers;
@@ -395,7 +412,7 @@ export async function loadStrategy(address: string, discovery: 'configured' | 's
   // When the transfer index shows no swaps, fall back to the contract's own
   // cumulative counters, which are still chain state - never to a guess.
   if (fills.length === 0) {
-    receivedAseWei = toUnits(status.earned ?? status.realisedAseWei ?? 0);
+    receivedAseWei = toUnits(status.earned ?? status.earnedAseWei ?? status.realisedAseWei ?? 0);
     spentAseWei = toUnits(status.spentAseWei ?? status.buySpentAseWei ?? 0);
     soldTokenWei = 0n;
     boughtTokenWei = 0n;
@@ -541,6 +558,21 @@ async function fetchRegisteredStrategies(owner?: string): Promise<string[]> {
     if (address && !addresses.includes(address)) addresses.push(address);
   }
   return addresses;
+}
+
+/**
+ * Fast path for Portfolio: only the contracts this browser deployed for the
+ * wallet, without the network-wide Hub scan or receipt reconstruction.
+ * Status, balances and the contract's own counters are still read from chain.
+ */
+export async function loadLocalStrategies(owner?: string): Promise<LiveStrategy[]> {
+  const records = getUserStrategies(owner);
+  const loaded = await Promise.all(records.map((record) =>
+    loadStrategy(record.address, 'user', { light: true }).catch(() => null),
+  ));
+  return loaded.filter((strategy): strategy is LiveStrategy =>
+    Boolean(strategy) && strategy!.template !== 'strata-hub',
+  );
 }
 
 export async function loadStrategies(owner?: string): Promise<LiveStrategy[]> {

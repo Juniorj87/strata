@@ -87,18 +87,12 @@ export function Activity() {
           A chronological ledger of the fills indexed from verified Strata contracts, plus the swaps flowing through
           the Auras pools right now. Each row links back to its transaction and the strategy that produced it.
         </p>
-        <div className="mode-switch" role="tablist" style={{ marginTop: 22 }}>
-          <Link to="/analytics" className="mode-option">
-            <span>Overview</span>
-            <small>Volume & executions</small>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 22 }}>
+          <Link className="btn btn-ghost btn-sm" to="/leaderboard">
+            ← Leaderboard
           </Link>
-          <Link to="/activity" className="mode-option active">
-            <span>Fills</span>
-            <small>Every indexed fill</small>
-          </Link>
-          <Link to="/leaderboard" className="mode-option">
-            <span>Leaderboard</span>
-            <small>Wallets ranked</small>
+          <Link className="btn btn-ghost btn-sm" to="/deploy">
+            Create a bot
           </Link>
         </div>
       </section>
