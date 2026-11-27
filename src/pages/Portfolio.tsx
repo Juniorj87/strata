@@ -133,6 +133,7 @@ export function Portfolio() {
   const [loadingHoldings, setLoadingHoldings] = useState(false);
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [stopping, setStopping] = useState<string | null>(null);
+  const [stoppingStopOnly, setStoppingStopOnly] = useState(false);
   const [depositing, setDepositing] = useState<string | null>(null);
   const [listTick, setListTick] = useState(0);
   const [botNotice, setBotNotice] = useState<Record<string, { kind: 'ok' | 'err'; text: string }>>({});
@@ -198,7 +199,7 @@ export function Portfolio() {
     setListTick((value) => value + 1);
   };
 
-  const closeBotRecord = async (record: DeployedStrategyRecord, alreadyStopped: boolean) => {
+  const closeBotRecord = async (record: DeployedStrategyRecord, alreadyStopped: boolean, stopOnly = false) => {
     if (!wallet.connected || !wallet.address) {
       wallet.openConnect();
       return;
@@ -208,7 +209,10 @@ export function Portfolio() {
     const notice = (kind: 'ok' | 'err', text: string) =>
       setBotNotice((prev) => ({ ...prev, [record.address]: { kind, text } }));
     setStopping(record.address);
-    notice('ok', alreadyStopped ? 'Reading what is left in the bot…' : 'Closing the bot — approve each wallet prompt as it appears…');
+    setStoppingStopOnly(stopOnly);
+    notice('ok', stopOnly
+      ? 'Stopping the bot — approve the wallet prompt. Funds stay in the contract.'
+      : alreadyStopped ? 'Reading what is left in the bot…' : 'Closing the bot — approve each wallet prompt as it appears…');
     try {
       const isPerp = isPerpTemplate(record.template) || record.venue === 'asepad-perps';
       const liveMatch = (liveStrategies.data ?? []).find(
@@ -224,6 +228,7 @@ export function Portfolio() {
         supportsPerpClose: isPerp,
         perpMarketId: record.marketId ?? liveMatch?.marketId ?? null,
         needsStop: !alreadyStopped,
+        stopOnly,
         onProgress: (text) => notice('ok', text),
         onStopped: () => saveUserStrategy({ ...record, status: 'stopped' }),
         onStep: (method, hash) => {
@@ -246,6 +251,7 @@ export function Portfolio() {
         },
       });
       const parts = [result.stopped ? 'Bot stopped' : 'Funds withdrawn'];
+      if (stopOnly) parts.push('funds stay in the contract — withdraw them when you are ready');
       if (result.aseWithdrawn > 0n) parts.push(`${fmtWei(result.aseWithdrawn, 3)} ASE returned`);
       if (!result.stopped && result.aseWithdrawn === 0n && result.tokenReclaimed === 0n) {
         parts.push('nothing left to withdraw');
@@ -263,6 +269,7 @@ export function Portfolio() {
       notice('err', text);
     } finally {
       setStopping(null);
+      setStoppingStopOnly(false);
     }
   };
 
@@ -846,11 +853,11 @@ export function Portfolio() {
                   My bots
                   <InfoTip
                     label="Managing and removing bots"
-                    text="Closing a bot cancels its schedule and returns ASE and tokens to your wallet. Removing a finished bot only hides the record in this browser and never touches the contract."
+                    text="Stopping a bot cancels its schedule and leaves the ASE and tokens in the contract, so you can withdraw them later. Closing cancels the schedule and returns everything to your wallet. Removing a finished bot only hides the record in this browser and never touches the contract."
                   />
                 </span>
                 <p className="muted" style={{ marginTop: 4 }}>
-                  Close a bot anytime to cancel its schedule and withdraw remaining funds.
+                  Stop a bot to cancel its schedule at any time; close it to also withdraw the remaining funds.
                 </p>
               </div>
               <Link to="/deploy" className="btn btn-ghost btn-sm">
@@ -1032,21 +1039,29 @@ export function Portfolio() {
                               >
                                 Manage bot
                               </Link>
+                              {strategy.status !== 'failed' && !stopped && (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  disabled={stopping === strategy.address}
+                                  title="Cancel the schedule and keep the funds in the contract"
+                                  onClick={() => void closeBotRecord(strategy, false, true)}
+                                >
+                                  {stopping === strategy.address && stoppingStopOnly ? 'Stopping…' : 'Stop bot'}
+                                </button>
+                              )}
                               {strategy.status !== 'failed' && (
                                 <button
                                   type="button"
                                   className="btn btn-ghost"
                                   disabled={stopping === strategy.address}
-                                  onClick={() => void closeBotRecord(
-                                    strategy,
-                                    liveMatch?.stopped === true || strategy.status === 'stopped',
-                                  )}
+                                  onClick={() => void closeBotRecord(strategy, stopped)}
                                 >
-                                  {stopping === strategy.address
-                                    ? 'Closing…'
-                                    : liveMatch?.stopped === true || strategy.status === 'stopped'
+                                  {stopping === strategy.address && !stoppingStopOnly
+                                    ? (stopped ? 'Withdrawing…' : 'Closing…')
+                                    : stopped
                                       ? 'Withdraw funds'
-                                      : 'Close bot'}
+                                      : 'Close & withdraw'}
                                 </button>
                               )}
                             </>

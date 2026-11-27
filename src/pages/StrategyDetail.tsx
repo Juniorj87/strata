@@ -90,6 +90,7 @@ export function StrategyDetail() {
   const wallet = useWallet();
   const client = useAsentum();
   const [actionBusy, setActionBusy] = useState(false);
+  const [actionMode, setActionMode] = useState<'close' | 'withdraw' | 'stop' | null>(null);
   const [actionMessage, setActionMessage] = useState('');
   const [actionError, setActionError] = useState('');
   const [marketTitle, setMarketTitle] = useState('');
@@ -152,10 +153,11 @@ export function StrategyDetail() {
     navigate('/portfolio');
   };
 
-  const runOwnerAction = async (mode: 'close' | 'withdraw') => {
+  const runOwnerAction = async (mode: 'close' | 'withdraw' | 'stop') => {
     const recipient = userAse1 || userHex;
     if (!walletIsOwner || !recipient) return;
     setActionBusy(true);
+    setActionMode(mode);
     setActionMessage('');
     setActionError('');
     try {
@@ -172,7 +174,8 @@ export function StrategyDetail() {
           || Boolean(strategy?.source?.includes('withdrawTokens'))),
         supportsPerpClose: isPerp,
         perpMarketId: strategy?.marketId ?? null,
-        needsStop: mode === 'close',
+        needsStop: mode !== 'withdraw',
+        stopOnly: mode === 'stop',
         onProgress: setActionMessage,
         onStopped: () => {
           if (!wallet.address || !strategy) return;
@@ -202,6 +205,9 @@ export function StrategyDetail() {
         },
       });
       const parts = [result.stopped ? 'Bot stopped' : 'Funds withdrawn'];
+      if (mode === 'stop') {
+        parts.push('the remaining funds stay in the contract until you withdraw them');
+      }
       if (result.aseWithdrawn > 0n) parts.push(`${fmtWei(result.aseWithdrawn, 3)} ASE returned`);
       if (result.tokenReclaimed > 0n && strategy?.tokenDecimals != null) {
         parts.push(`${formatToken(result.tokenReclaimed, strategy.tokenDecimals, strategy?.symbol ?? 'tokens')} returned`);
@@ -223,6 +229,7 @@ export function StrategyDetail() {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setActionBusy(false);
+      setActionMode(null);
     }
   };
 
@@ -309,7 +316,7 @@ export function StrategyDetail() {
         <p className="section-note" style={{ maxWidth: 720, marginTop: 12 }}>
           {notArmed
             ? 'This contract was deployed but never armed: it has no owner on chain, holds no funds and will never run. Remove the entry and create a new bot.'
-            : 'This is your bot\'s management page: live status, balances, trade history and contract details. Nothing here needs configuring — the bot runs on-chain on its schedule. To stop it and send everything back to your wallet, use Close bot & return funds.'}
+            : 'This is your bot\'s management page: live status, balances, trade history and contract details. Nothing here needs configuring — the bot runs on-chain on its schedule. Stop bot cancels the schedule and leaves the funds in the contract; Close bot & return funds also sends everything back to your wallet.'}
         </p>
         <div className="detail-meta">
           <span className={statusClass}>{statusLabel}</span>
@@ -336,13 +343,26 @@ export function StrategyDetail() {
             </div>
           ) : (
             <div className="manage-bar">
+              {needsStop && (
+                <button
+                  className="btn btn-ghost"
+                  type="button"
+                  disabled={actionBusy}
+                  title="Cancel the schedule and keep the funds in the contract"
+                  onClick={() => void runOwnerAction('stop')}
+                >
+                  {actionBusy && actionMode === 'stop' ? 'Stopping…' : 'Stop bot'}
+                </button>
+              )}
               <button
                 className="btn btn-primary"
                 type="button"
                 disabled={actionBusy || (!needsStop && !hasBalance)}
                 onClick={() => void runOwnerAction(needsStop ? 'close' : 'withdraw')}
               >
-                {actionBusy ? 'Closing…' : needsStop ? 'Close bot & return funds' : hasBalance ? 'Withdraw everything' : 'Nothing to withdraw'}
+                {actionBusy && actionMode !== 'stop'
+                  ? (needsStop ? 'Closing…' : 'Withdrawing…')
+                  : needsStop ? 'Close bot & return funds' : hasBalance ? 'Withdraw everything' : 'Nothing to withdraw'}
               </button>
               <Link className="btn btn-ghost" to={deployCopyUrl}>
                 Clone settings
@@ -371,7 +391,7 @@ export function StrategyDetail() {
           <p className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
             {knownStopped
               ? 'The schedule is cancelled. Everything left in the contract goes back to your wallet in one action.'
-              : 'Closing cancels the schedule, refunds unused gas escrow, then sends the remaining ASE and unsold tokens to your wallet. Your wallet asks you to approve each prompt — no seed phrase or private key is needed.'}
+              : 'Stop bot cancels the schedule but leaves the money in the contract, so you can withdraw later. Close bot & return funds cancels the schedule, refunds unused gas escrow, then sends the remaining ASE and unsold tokens to your wallet. Your wallet asks you to approve each prompt — no seed phrase or private key is needed.'}
           </p>
         )}
         {!notArmed && !knownStopped && !strategy.cron && (

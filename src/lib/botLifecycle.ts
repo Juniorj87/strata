@@ -38,6 +38,8 @@ export interface BotCloseOptions {
   supportsPerpClose?: boolean;
   perpMarketId?: string | null;
   needsStop: boolean;
+  /** Cancel the schedule and nothing else: the funds stay inside the contract until the owner withdraws them. */
+  stopOnly?: boolean;
   onProgress?: (message: string) => void;
   onStopped?: () => void;
   onStep?: (method: BotStepMethod, hash: string) => void;
@@ -54,6 +56,7 @@ export async function closeBot(options: BotCloseOptions): Promise<BotCloseResult
     supportsPerpClose,
     perpMarketId,
     needsStop,
+    stopOnly,
     onProgress,
     onStopped,
     onStep,
@@ -137,6 +140,13 @@ export async function closeBot(options: BotCloseOptions): Promise<BotCloseResult
     await send('stop', [], stoppedOnChain);
     stopped = true;
     onStopped?.();
+  }
+
+  // Stop-only is the half-step: the contract requires a stopped strategy
+  // before withdraw(), so the owner can halt trading now and move the funds
+  // later. Perp contracts unwind their own position inside stop().
+  if (stopOnly) {
+    return { stopped, aseWithdrawn: 0n, tokenReclaimed: 0n, steps };
   }
 
   // If this is a Perps bot and stop() could not automatically unwind the vault
