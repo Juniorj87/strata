@@ -16,7 +16,9 @@
  * timeframes and pairs does not hammer the indexer.
  */
 
-export const AURAS_API = 'https://auras.asentum.com';
+import { NETWORK } from './network';
+
+export const AURAS_API = NETWORK.aurasApiUrl;
 
 /** Bucket sizes the indexer serves directly, in seconds. */
 export const NATIVE_INTERVALS = [60, 300, 900, 3600, 14400, 86400] as const;

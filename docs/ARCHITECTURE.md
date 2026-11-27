@@ -313,6 +313,6 @@ The chart exposes 1m, 5m, 15m, 30m, 1h, 4h, 1d and 1w. The 30m and 1w views are 
 
 `src/lib/tokenFactory.ts` deploys a fixed-supply ARC-20 contract and initializes it in a separate wallet-signed transaction. `src/lib/walletRegistry.ts` is an opt-in, browser-local registry of public wallet addresses; it does not upload addresses to a server.
 
-`src/lib/perps.ts` is an unconfigured provider adapter. No public AsePad perps contract/API is connected, so no perp position or pricing is simulated.
+`src/lib/perps.ts` connects to the live AsePad Perps config registry (`0x37d25f3a292f0642af72d6f161eafb18c76e16a6`), dynamically resolving `engine`, `orders`, `liquidation`, `markets`, `vault` and `oracle`. Manual perps trading lives in `src/components/PerpsTerminal.tsx`, and the guided builder for both autonomous `perp-*` Cron contracts and direct `perps.asepad.fun` keeper orders lives in `src/components/PerpsBotBuilder.tsx`.
 
 See [PRODUCT_GUIDE.md](PRODUCT_GUIDE.md) for the current feature matrix and behaviour boundaries.

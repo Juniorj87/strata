@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { chainStorageKey } from '../lib/network';
 import type { LiveStrategy } from '../lib/registry';
 import { fmtWei } from '../lib/format';
 import { getReceipt } from '../lib/rpc';
@@ -32,7 +33,7 @@ function receiptFeeWei(receipt: Record<string, unknown> | null): bigint | null {
 }
 
 export function StrategyPnlPanel({ strategy }: { strategy: LiveStrategy }) {
-  const key = `strata:cost-basis:${strategy.address.toLowerCase()}`;
+  const key = chainStorageKey(`strata:cost-basis:${strategy.address.toLowerCase()}`);
   const [costBasis, setCostBasis] = useState(() => {
     try { return window.localStorage.getItem(key) ?? ''; } catch { return ''; }
   });

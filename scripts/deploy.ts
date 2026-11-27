@@ -18,8 +18,11 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const RPC = process.env.STRATA_RPC ?? 'https://explorer.asentum.com';
-const STRATA_HUB = process.env.STRATA_HUB_ADDRESS || 'ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut';
+const RPC = process.env.STRATA_RPC ?? process.env.VITE_RPC_URL ?? 'https://explorer.asentum.com';
+const EXPLORER = (process.env.VITE_EXPLORER_URL ?? 'https://explorer.asentum.com').replace(/\/+$/, '');
+const STRATA_HUB = process.env.STRATA_HUB_ADDRESS || process.env.VITE_STRATA_HUB || 'ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut';
+const AURAS_AMM_DEFAULT = process.env.VITE_AURAS_AMM || '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
+const ASEDEX_AMM_DEFAULT = process.env.VITE_ASEDEX_AMM || '0xc3833b73eb30242289e533b3e97c4b72b97e24e9';
 const CONFIG_PATH = resolve(ROOT, 'src/config/strategies.json');
 const SEED_PATH = resolve(ROOT, '.strata/seed.json');
 
@@ -32,7 +35,15 @@ const CRON_GAS_LIMIT: Record<string, bigint> = {
   'risk-managed': 900000n,
   scale: 800000n,
   'limit-exit': 750000n,
+  'perp-dca': 4500000n,
+  'perp-trigger': 4500000n,
+  'perp-grid': 4500000n,
+  'perp-risk': 4500000n,
+  'perp-twap': 4500000n,
+  'perp-momentum': 4500000n,
 };
+
+const PERPS_CFG_DEFAULT = process.env.VITE_PERPS_CFG || '0x37d25f3a292f0642af72d6f161eafb18c76e16a6';
 
 const POOL_TOKENS: Record<string, { token: string; symbol: string }> = {
   '1': { token: '0xc24044dccea3ba8b362e1c85fa16ddc658022269', symbol: 'AURA' },
@@ -81,6 +92,30 @@ const TEMPLATES: Record<string, { file: string; args: (a: Args) => string[] }> =
     file: 'contracts/limit-exit.js',
     args: (a) => [a.pool, a.token, a.sizeWei, a.budgetWei, String(a.decimals), a.targetUpsideBps, String(a.interval), a.ammAddress],
   },
+  'perp-dca': {
+    file: 'contracts/perp-dca.js',
+    args: (a) => [a.marketId, a.perpSide, a.leverage, a.legMarginWei, a.marginWei, String(a.interval), a.tpBps, a.slBps, a.cfgAddress],
+  },
+  'perp-trigger': {
+    file: 'contracts/perp-trigger.js',
+    args: (a) => [a.marketId, a.perpSide, a.leverage, a.marginWei, a.triggerMoveBps, a.triggerDir, String(a.interval), a.tpBps, a.slBps, a.cfgAddress],
+  },
+  'perp-grid': {
+    file: 'contracts/perp-grid.js',
+    args: (a) => [a.marketId, a.perpSide, a.leverage, a.threshold, String(a.levels), a.marginWei, String(a.interval), a.cfgAddress],
+  },
+  'perp-risk': {
+    file: 'contracts/perp-risk.js',
+    args: (a) => [a.marketId, a.perpSide, a.leverage, a.marginWei, a.stopLossBps, a.takeProfitBps, a.maxDrawdownBps, String(a.interval), a.cfgAddress],
+  },
+  'perp-twap': {
+    file: 'contracts/perp-twap.js',
+    args: (a) => [a.marketId, a.perpSide, a.leverage, a.marginWei, String(a.slices), String(a.interval), a.cfgAddress],
+  },
+  'perp-momentum': {
+    file: 'contracts/perp-momentum.js',
+    args: (a) => [a.marketId, a.leverage, a.marginWei, a.threshold, String(a.interval), a.cfgAddress],
+  },
 };
 
 interface Args {
@@ -107,6 +142,16 @@ interface Args {
   buySizeAseWei: string;
   buyBudgetAseWei: string;
   ammAddress: string;
+  marketId: string;
+  perpSide: string;
+  leverage: string;
+  marginWei: string;
+  legMarginWei: string;
+  triggerMoveBps: string;
+  triggerDir: string;
+  tpBps: string;
+  slBps: string;
+  cfgAddress: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -125,17 +170,18 @@ function parseArgs(argv: string[]): Args {
 
   const rawAmm = (flags.amm ?? 'auras').toLowerCase();
   const ammAddress = rawAmm === 'asedex' || rawAmm === 'asepad'
-    ? '0xc3833b73eb30242289e533b3e97c4b72b97e24e9'
+    ? ASEDEX_AMM_DEFAULT
     : rawAmm === 'auras' || rawAmm === 'strata'
-    ? '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2'
-    : flags.amm || '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
+    ? AURAS_AMM_DEFAULT
+    : flags.amm || AURAS_AMM_DEFAULT;
 
   const template = flags.template ?? 'momentum-signal';
+  const isPerp = template.startsWith('perp-');
   const dryRun = flags['dry-run'] === 'true';
   const pool = flags.pool ?? '1';
   if (!/^\d+$/.test(pool) || Number(pool) < 1) throw new Error('--pool must be a positive integer');
-  const token = flags.token ?? POOL_TOKENS[pool]?.token ?? '';
-  if (!token) throw new Error(`Pool #${pool} is not in the local map. Pass its live token address with --token.`);
+  const token = isPerp ? (flags.token ?? '') : (flags.token ?? POOL_TOKENS[pool]?.token ?? '');
+  if (!isPerp && !token) throw new Error(`Pool #${pool} is not in the local map. Pass its live token address with --token.`);
   const size = flags.size ?? '250';
   const decimals = Number(flags.decimals ?? 18);
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw new Error('--decimals must be an integer from 0 to 18');
@@ -171,8 +217,8 @@ function parseArgs(argv: string[]): Args {
   const levels = Number(flags.levels ?? 5);
   if (!Number.isInteger(slices) || slices < 1 || slices > 100) throw new Error('--slices must be an integer from 1 to 100');
   if (!Number.isInteger(levels) || levels < 1 || levels > 20) throw new Error('--levels must be an integer from 1 to 20');
-  if (!/^0x[0-9a-fA-F]{40}$/.test(token) && !/^ase1[0-9a-z]{20,}$/.test(token)) throw new Error('--token must be a valid 0x or ase1 address');
-  const tradingTemplate = !['strata-hub', 'marketplace', 'momentum-signal', 'dca'].includes(template);
+  if (!isPerp && !/^0x[0-9a-fA-F]{40}$/.test(token) && !/^ase1[0-9a-z]{20,}$/.test(token)) throw new Error('--token must be a valid 0x or ase1 address');
+  const tradingTemplate = !isPerp && !['strata-hub', 'marketplace', 'momentum-signal', 'dca'].includes(template);
   const budget = flags.budget ?? (tradingTemplate ? '' : '0');
   let budgetWei = '0';
   if (tradingTemplate) {
@@ -205,6 +251,20 @@ function parseArgs(argv: string[]): Args {
     throw new Error(`--escrow must be at least ${minimumCronEscrow} wei ASE for one scheduled run of ${template}`);
   }
 
+  const marketId = flags.market ?? '1';
+  const perpSide = (flags.side ?? 'LONG').toUpperCase();
+  if (perpSide !== 'LONG' && perpSide !== 'SHORT') throw new Error('--side must be LONG or SHORT');
+  const leverage = flags.leverage ?? '3';
+  if (!/^[1-9]\d*$/.test(leverage) || Number(leverage) > 20) throw new Error('--leverage must be a positive integer');
+  const marginWei = parseAseWei(flags.margin ?? '2', '--margin');
+  const legMarginWei = parseAseWei(flags['margin-per-leg'] ?? '0.5', '--margin-per-leg');
+  const triggerMoveBps = flags['trigger-move-bps'] ?? '300';
+  const triggerDir = (flags['trigger-dir'] ?? 'below').toLowerCase();
+  if (triggerDir !== 'below' && triggerDir !== 'above') throw new Error('--trigger-dir must be below or above');
+  const tpBps = flags['tp-bps'] ?? stopLossBps ? (flags['tp-bps'] ?? flags['take-profit'] ?? '1000') : '1000';
+  const slBps = flags['sl-bps'] ?? flags['stop-loss'] ?? '500';
+  const cfgAddress = flags.cfg ?? PERPS_CFG_DEFAULT;
+
   return {
     template,
     dryRun,
@@ -229,6 +289,16 @@ function parseArgs(argv: string[]): Args {
     buySizeAseWei,
     buyBudgetAseWei,
     ammAddress,
+    marketId,
+    perpSide,
+    leverage,
+    marginWei,
+    legMarginWei,
+    triggerMoveBps,
+    triggerDir,
+    tpBps,
+    slBps,
+    cfgAddress,
   };
 }
 
@@ -276,7 +346,12 @@ async function main() {
   const balance = await wallet.getBalance();
   console.log(`  balance    ${(balance / 10n ** 18n).toString()} ASE`);
 
-  const nativeStrategyBudget = ['grid', 'dca'].includes(args.template) ? BigInt(args.buyBudgetAseWei) : 0n;
+  const isPerp = args.template.startsWith('perp-');
+  const nativeStrategyBudget = ['grid', 'dca'].includes(args.template)
+    ? BigInt(args.buyBudgetAseWei)
+    : isPerp
+      ? BigInt(args.marginWei)
+      : 0n;
   if (balance < args.escrowWei + nativeStrategyBudget + 10n ** 15n) {
     console.error(
       `\n  Not enough test ASE for the deploy fee and the cron escrow.\n` +
@@ -362,7 +437,7 @@ async function main() {
     }
   }
 
-  if (!['strata-hub', 'marketplace'].includes(args.template)) {
+  if (!['strata-hub', 'marketplace'].includes(args.template) && !isPerp) {
   console.log('  registering in Strata Hub…');
   try {
     const hub = new AsentumContract(client, STRATA_HUB).connect(wallet);
@@ -379,7 +454,7 @@ async function main() {
   }
 
 
-  if (!['strata-hub', 'marketplace'].includes(args.template)) {
+  if (!['strata-hub', 'marketplace'].includes(args.template) && !isPerp) {
     const existing = existsSync(CONFIG_PATH)
       ? (JSON.parse(await readFile(CONFIG_PATH, 'utf8')) as unknown[])
       : [];
@@ -390,8 +465,8 @@ async function main() {
     await writeFile(CONFIG_PATH, `${JSON.stringify(merged, null, 2)}\n`);
     console.log(`\n  registered in src/config/strategies.json`);
   }
-  console.log(`  explorer      https://explorer.asentum.com/address/${wallet.address}`);
-  console.log(`  strategy      https://explorer.asentum.com/address/${address}\n`);
+  console.log(`  explorer      ${EXPLORER}/address/${wallet.address}`);
+  console.log(`  strategy      ${EXPLORER}/address/${address}\n`);
 }
 
 main().catch((err: unknown) => {

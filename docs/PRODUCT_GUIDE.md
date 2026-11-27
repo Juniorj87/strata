@@ -116,11 +116,15 @@ These are separate products and must not share execution logic or terminology:
 
 In Advanced Trading, the Market / Limit / Bot ticket is the Spot workflow. The Perps panel is a separate, explicitly unavailable integration until a real provider is published. Never route a Perps action through an AMM swap or a spot strategy contract.
 
-## Perpetuals
+## Perpetuals (AsePad Perps)
 
-No external perpetuals venue is configured in this repository. AsePad's creator has described an external protocol in testing, including a spot-price oracle and insurance-fund mechanism, but no public contract address, ABI or API has been supplied here.
+`src/lib/perps.ts` resolves the live AsePad Perps modules from `0x37d25f3a292f0642af72d6f161eafb18c76e16a6` (`engine`, `orders`, `liquidation`, `markets`, `vault`, `oracle`). In Advanced Trading (`/advanced`) and the Bot Builder (`/deploy`), switching to AsePad Perps exposes:
 
-`src/lib/perps.ts` is an adapter boundary only. Long/short, leverage, margin, funding, liquidation and perp position actions remain unavailable. Spot AMM prices are not substituted for perp mark/index prices.
+- **Manual Perps & Vault (`src/components/PerpsTerminal.tsx`):** Market/Limit Long & Short orders, Vault collateral deposit/withdrawal, open positions, and native order cancellation.
+- **Autonomous Perp Cron Bots (`contracts/perp-*.js`):** Six isolated contract templates (`perp-dca`, `perp-trigger`, `perp-grid`, `perp-risk`, `perp-twap`, `perp-momentum`) that hold ASE margin in the Perps Vault and run on Asentum Cron.
+- **Direct Keeper Orders (`src/components/PerpsBotBuilder.tsx`):** Native `perps.asepad.fun` TWAP/DCA, Scale Ladder, Limit+TP/SL, Trailing Stop, and Stop/TP orders placed directly on the connected wallet's Vault account.
+
+Spot AMM pools and AsePad Perps remain strictly separate execution paths; spot AMM prices are never substituted for Perps oracle mark prices.
 
 ## Asentum Cron constraints
 

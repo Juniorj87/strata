@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useWallet } from '@asentum/connect';
-import { toAse1, toHexAddress } from '../lib/rpc';
+import { explorerAddressUrl, toAse1, toHexAddress } from '../lib/rpc';
 import {
   clearWalletRegistry,
   readWalletRegistry,
@@ -93,7 +93,7 @@ export function WalletRegistryPanel() {
                   <li key={item.address}>
                     <a
                       className="mono"
-                      href={`https://explorer.asentum.com/address/${toAse1(item.address)}`}
+                      href={explorerAddressUrl(item.address)}
                       target="_blank"
                       rel="noreferrer"
                     >

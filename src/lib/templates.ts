@@ -1,3 +1,5 @@
+export type TemplateVenue = 'spot' | 'perps';
+
 export interface Template {
   id: string;
   name: string;
@@ -10,8 +12,10 @@ export interface Template {
   liteDesc: string;
   /** Important implementation limitation shown before signing. */
   behavior: string;
-  /** Whether the current contract can place token -> ASE trades. */
+  /** Whether the current contract can place token -> ASE spot trades. */
   trades: boolean;
+  /** Venue category: Spot AMM (Auras / AseDex) or AsePad Perps. */
+  venue?: TemplateVenue;
 }
 
 export const TEMPLATES: Template[] = [
@@ -25,6 +29,7 @@ export const TEMPLATES: Template[] = [
     requires: 'gas',
     trades: false,
     contract: 'contracts/auras-momentum-signal.js',
+    venue: 'spot',
   },
   {
     id: 'momentum-trader',
@@ -36,6 +41,7 @@ export const TEMPLATES: Template[] = [
     requires: 'tokens',
     trades: true,
     contract: 'contracts/auras-momentum-trader.js',
+    venue: 'spot',
   },
   {
     id: 'grid',
@@ -47,6 +53,7 @@ export const TEMPLATES: Template[] = [
     requires: 'both',
     trades: true,
     contract: 'contracts/grid.js',
+    venue: 'spot',
   },
   {
     id: 'twap',
@@ -58,6 +65,7 @@ export const TEMPLATES: Template[] = [
     requires: 'tokens',
     trades: true,
     contract: 'contracts/twap.js',
+    venue: 'spot',
   },
   {
     id: 'dca',
@@ -69,6 +77,7 @@ export const TEMPLATES: Template[] = [
     requires: 'ase',
     trades: true,
     contract: 'contracts/dca.js',
+    venue: 'spot',
   },
   {
     id: 'risk-managed',
@@ -80,6 +89,7 @@ export const TEMPLATES: Template[] = [
     requires: 'tokens',
     trades: true,
     contract: 'contracts/risk-managed.js',
+    venue: 'spot',
   },
   {
     id: 'limit-exit',
@@ -91,6 +101,7 @@ export const TEMPLATES: Template[] = [
     requires: 'tokens',
     trades: true,
     contract: 'contracts/limit-exit.js',
+    venue: 'spot',
   },
   {
     id: 'scale',
@@ -102,10 +113,84 @@ export const TEMPLATES: Template[] = [
     requires: 'tokens',
     trades: true,
     contract: 'contracts/scale.js',
+    venue: 'spot',
+  },
+  // ── AsePad Perps Bot Templates ──────────────────────────────────────────────
+  {
+    id: 'perp-dca',
+    name: 'Perp DCA',
+    desc: 'Opens or scales into a leveraged Long or Short position on AsePad Perps on a recurring Cron schedule with optional TP/SL.',
+    liteDesc: 'Accumulate a leveraged Long or Short position on AsePad Perps at equal intervals, with optional automatic Take-Profit and Stop-Loss.',
+    behavior: 'Isolated ASE margin is deposited into the AsePad Perps Vault at init. Asentum Cron executes each leveraged leg via AsePad Perps Engine and checks optional TP/SL exits.',
+    intervalSec: 300,
+    requires: 'ase',
+    trades: false,
+    contract: 'contracts/perp-dca.js',
+    venue: 'perps',
+  },
+  {
+    id: 'perp-trigger',
+    name: 'Perp Trigger',
+    desc: 'Watches AsePad Perps mark price and opens a leveraged Long or Short when your target entry price is crossed, with optional TP/SL.',
+    liteDesc: 'Wait for a dip or breakout on the AsePad Perps oracle mark, open a leveraged Long or Short automatically, and monitor optional TP/SL.',
+    behavior: 'Scheduled mark-price entry trigger on AsePad Perps with isolated margin in your bot contract.',
+    intervalSec: 60,
+    requires: 'ase',
+    trades: false,
+    contract: 'contracts/perp-trigger.js',
+    venue: 'perps',
+  },
+  {
+    id: 'perp-grid',
+    name: 'Perp Grid',
+    desc: 'Runs a leveraged grid on AsePad Perps: adds levels when price steps against your anchor and takes profit (+step) on reversals.',
+    liteDesc: 'Trade sideways oscillations on AsePad Perps with leverage — scales in across price steps and reduces each level for profit on rebounds.',
+    behavior: 'Maintains isolated margin in AsePad Perps Vault; opens/increases on adverse grid steps and reduces/closes on +step reversals.',
+    intervalSec: 60,
+    requires: 'ase',
+    trades: false,
+    contract: 'contracts/perp-grid.js',
+    venue: 'perps',
+  },
+  {
+    id: 'perp-risk',
+    name: 'Perp SL / TP',
+    desc: 'Opens a leveraged Long or Short position on AsePad Perps guarded by on-chain Stop-Loss, Take-Profit and trailing drawdown.',
+    liteDesc: 'Enter an isolated leveraged Long or Short position on AsePad Perps with automated Stop-Loss, Take-Profit and trailing drawdown.',
+    behavior: 'Checks AsePad Perps oracle mark every interval and automatically closes the position and withdraws collateral when any exit guard triggers.',
+    intervalSec: 60,
+    requires: 'ase',
+    trades: false,
+    contract: 'contracts/perp-risk.js',
+    venue: 'perps',
+  },
+  {
+    id: 'perp-twap',
+    name: 'Perp TWAP',
+    desc: 'Splits a large leveraged Long or Short entry on AsePad Perps into N equal timed slices.',
+    liteDesc: 'Build a leveraged Long or Short position on AsePad Perps in equal timed parts to average across mark updates.',
+    behavior: 'Isolated ASE margin in AsePad Perps Vault; each Cron slice sizes from live oracle mark and stops once all slices complete.',
+    intervalSec: 300,
+    requires: 'ase',
+    trades: false,
+    contract: 'contracts/perp-twap.js',
+    venue: 'perps',
+  },
+  {
+    id: 'perp-momentum',
+    name: 'Perp Momentum',
+    desc: 'Follows AsePad Perps mark momentum: opens Long on upward drift and closes/flips Short on downward drift.',
+    liteDesc: 'Reads consecutive AsePad Perps mark observations and trades Long/Short trend swings automatically.',
+    behavior: 'Isolated ASE margin in AsePad Perps Vault; opens Long on upward mark moves above threshold and closes or flips Short on downward reversals.',
+    intervalSec: 300,
+    requires: 'ase',
+    trades: false,
+    contract: 'contracts/perp-momentum.js',
+    venue: 'perps',
   },
 ];
 
-/** The five bot types offered in the simple terminal, in trader language. */
+/** The five bot types offered in the simple Spot terminal, in trader language. */
 export interface BotType {
   templateId: string;
   /** Short monogram shown in the tab badge (no emoji glyphs). */
@@ -153,10 +238,111 @@ export const BOT_TYPES: BotType[] = [
   },
 ];
 
+/** Six autonomous Cron bot types for AsePad Perps (isolated contract vault). */
+export const PERP_BOT_TYPES: BotType[] = [
+  {
+    templateId: 'perp-dca',
+    mark: 'DCA',
+    title: 'Perp DCA',
+    short: 'Long / Short',
+    blurb: 'Open and scale a leveraged Long or Short position on AsePad Perps on a fixed Cron schedule, with optional TP/SL.',
+  },
+  {
+    templateId: 'perp-trigger',
+    mark: 'TRIG',
+    title: 'Trigger',
+    short: 'Dip / Breakout',
+    blurb: 'Wait for AsePad Perps mark price to cross your target move, enter with leverage and watch optional TP/SL.',
+  },
+  {
+    templateId: 'perp-grid',
+    mark: 'GRID',
+    title: 'Perp Grid',
+    short: 'Range grid',
+    blurb: 'Scale into leveraged levels on step moves and automatically take profit when price rebounds.',
+  },
+  {
+    templateId: 'perp-risk',
+    mark: 'RISK',
+    title: 'SL / TP Bot',
+    short: 'Guarded pos',
+    blurb: 'Enter a leveraged Long or Short guarded on-chain by Stop-Loss, Take-Profit and trailing drawdown.',
+  },
+  {
+    templateId: 'perp-twap',
+    mark: 'TWAP',
+    title: 'Perp TWAP',
+    short: 'Split entry',
+    blurb: 'Split a leveraged Long or Short entry into equal timed slices across AsePad Perps mark updates.',
+  },
+  {
+    templateId: 'perp-momentum',
+    mark: 'MOM',
+    title: 'Perp Momentum',
+    short: 'Trend follow',
+    blurb: 'Reads consecutive AsePad Perps mark observations and trades Long on upward drift, Short on downward drift.',
+  },
+];
+
+/** Five direct `perps.asepad.fun` native order bots (submitted via `engine.placeOrder` for your wallet account). */
+export type PerpsDirectKind = 'DCA' | 'SCALE' | 'LIMIT' | 'TRAIL' | 'STOP';
+
+export interface PerpsDirectBotType {
+  kind: PerpsDirectKind;
+  mark: string;
+  title: string;
+  short: string;
+  blurb: string;
+}
+
+export const PERPS_DIRECT_BOT_TYPES: PerpsDirectBotType[] = [
+  {
+    kind: 'DCA',
+    mark: 'TWAP',
+    title: 'TWAP / DCA',
+    short: 'Keeper slices',
+    blurb: 'Places a native TWAP/DCA order directly on your perps.asepad.fun account — sliced automatically by AsePad keepers.',
+  },
+  {
+    kind: 'SCALE',
+    mark: 'SCALE',
+    title: 'Scale Ladder',
+    short: 'Price ladder',
+    blurb: 'Places stepped orders between From and To prices directly on perps.asepad.fun (up to 16 ladder steps).',
+  },
+  {
+    kind: 'LIMIT',
+    mark: 'LIMIT',
+    title: 'Limit + TP/SL',
+    short: 'GTC / Post-only',
+    blurb: 'Places a resting Limit order on perps.asepad.fun with optional attached Take-Profit and Stop-Loss exits.',
+  },
+  {
+    kind: 'TRAIL',
+    mark: 'TRAIL',
+    title: 'Trailing Stop',
+    short: 'Trails mark %',
+    blurb: 'Places an on-chain trailing stop directly on perps.asepad.fun that ratchets automatically with mark price.',
+  },
+  {
+    kind: 'STOP',
+    mark: 'TRIG',
+    title: 'Stop / TP',
+    short: 'Mark trigger',
+    blurb: 'Places a Stop or Take-Profit trigger order directly on your perps.asepad.fun vault account.',
+  },
+];
+
 export function templateById(id: string | null): Template {
   return TEMPLATES.find((t) => t.id === id) ?? TEMPLATES[0];
 }
 
 export function botTypeFor(templateId: string): BotType | null {
-  return BOT_TYPES.find((bot) => bot.templateId === templateId) ?? null;
+  return BOT_TYPES.find((bot) => bot.templateId === templateId)
+    ?? PERP_BOT_TYPES.find((bot) => bot.templateId === templateId)
+    ?? null;
+}
+
+export function isPerpTemplate(templateId: string | null | undefined): boolean {
+  return Boolean(templateId && templateId.startsWith('perp-'));
 }

@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
+import { CHAIN_ID, NETWORK } from '../lib/network';
 import { explorerAddressUrl, explorerTxUrl, toAse1, toHexAddress } from '../lib/rpc';
 import { formatUnits, parseUnits, shortHash } from '../lib/format';
 import { TokenMark } from '../components/TokenMark';
+import { InfoTip } from '../components/InfoTip';
 import {
   clearTokenDraft,
   deployArc20,
@@ -208,12 +210,14 @@ export function CreateToken() {
   return (
     <>
       <section className="wrap detail-head">
-        <span className="label">Create Token · Asentum testnet</span>
+        <span className="label">Create Token · {NETWORK.shortLabel}</span>
         <h1 className="detail-title">Deploy an ARC-20 token.</h1>
-        <p className="section-note" style={{ maxWidth: 680, marginTop: 16 }}>
-          Asentum has no protocol-level token factory: a token is a JavaScript contract. Strata deploys the
-          published ARC-20 interface with a fixed supply, then verifies the metadata and supply by reading the
-          contract back.
+        <p className="section-note" style={{ marginTop: 10 }}>
+          Deploy a fixed-supply ARC-20 token contract and verify it directly on chain.
+          <InfoTip
+            label="How ARC-20 deployment works"
+            text="Asentum tokens are JavaScript contracts. Strata deploys the published ARC-20 interface with a fixed supply, initializes it, and verifies metadata and deployer balance back from the chain."
+          />
         </p>
       </section>
 
@@ -257,17 +261,15 @@ export function CreateToken() {
               </label>
             </div>
 
-            <dl className="create-token-alloc">
-              <div><dt>Initial allocation</dt><dd>100% to the deploying wallet</dd></div>
-              <div><dt>Mint after deploy</dt><dd>None — fixed supply</dd></div>
-              <div><dt>Tax / blacklist / pause</dt><dd>Not present</dd></div>
-              <div><dt>Description field</dt><dd>Not part of ARC-20</dd></div>
-            </dl>
-
-            <p className="field-help">
-              The contract follows the ARC-20 storage layout and events, so Auras pools, AseDex and the explorer can
-              read it without special handling. Decimals are limited to 0–18 here to match the pools Strata reads.
-            </p>
+            <div className="catalog-pills" style={{ marginTop: 14, marginBottom: 14 }}>
+              <span className="catalog-pill"><span>Allocation</span> 100% deployer</span>
+              <span className="catalog-pill"><span>Supply</span> Fixed</span>
+              <span className="catalog-pill"><span>Controls</span> No mint / tax / pause</span>
+              <InfoTip
+                label="ARC-20 compatibility"
+                text="Follows the ARC-20 storage layout and events so Auras, AseDex, and the explorer read it automatically. Decimals are limited to 0–18 to match Strata pools."
+              />
+            </div>
 
             {formError && touched && !locked && <p className="swap-note down">{formError}</p>}
             {error && (
@@ -313,7 +315,7 @@ export function CreateToken() {
                 </div>
               </div>
               <dl className="create-token-facts">
-                <div><dt>Network</dt><dd>Asentum testnet · chain 1423</dd></div>
+                <div><dt>Network</dt><dd>{NETWORK.shortLabel} · chain {CHAIN_ID}</dd></div>
                 <div><dt>Standard</dt><dd>ARC-20 (fixed supply)</dd></div>
                 <div><dt>Total supply</dt><dd className="mono">{supplyDisplay} {symbol || ''}</dd></div>
                 <div><dt>Decimals</dt><dd className="mono">{decimals || '—'}</dd></div>
@@ -364,16 +366,18 @@ export function CreateToken() {
               )}
             </div>
 
-            <div className="panel create-token-safety">
-              <span className="label">Safety boundaries</span>
-              <ul className="swap-checklist">
-                <li>No private keys, seed phrases or secrets are collected or stored.</li>
-                <li>Deployment and initialisation are two separate wallet signatures.</li>
-                <li>A failed initialisation keeps the deployed address for retry; it never auto-deploys twice.</li>
-                <li>Success is only reported after the explorer-visible transaction and a chain read agree.</li>
-              </ul>
-              <Link className="link-arrow" to="/advanced">Trade a token with an ASE pool →</Link>
-            </div>
+            <details className="soft-details">
+              <summary>Safety boundaries &amp; next step</summary>
+              <div className="soft-details-body">
+                <ul className="swap-checklist" style={{ marginBottom: 10 }}>
+                  <li>No private keys, seed phrases or secrets are collected or stored.</li>
+                  <li>Deployment and initialisation are two separate wallet signatures.</li>
+                  <li>A failed initialisation keeps the deployed address for retry; it never auto-deploys twice.</li>
+                  <li>Success is only reported after the explorer-visible transaction and a chain read agree.</li>
+                </ul>
+                <Link className="link-arrow" to="/advanced">Trade a token with an ASE pool →</Link>
+              </div>
+            </details>
           </aside>
         </div>
       </section>

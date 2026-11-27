@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { ConnectModal, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
-import { getHeads } from '../lib/rpc';
+import { CHAIN_ID, IS_TESTNET } from '../lib/network';
+import { EXPLORER_URL, explorerAddressUrl, getHeads } from '../lib/rpc';
 import { useTheme } from '../lib/theme';
 import { Logo } from './Logo';
 
@@ -209,7 +210,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <>
                 <a
                   className="mono wallet-chip"
-                  href={`https://explorer.asentum.com/address/${wallet.ase1Address}`}
+                  href={explorerAddressUrl(wallet.ase1Address)}
                   target="_blank"
                   rel="noreferrer"
                   title={
@@ -287,44 +288,33 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <div className="footer-col">
               <Logo size={24} />
               <span>
-                Trading rules as on-chain contracts. Choose a strategy, fund it from your wallet, and the
-                Asentum network runs the schedule.
+                Non-custodial trading terminal and on-chain strategy contracts on Asentum.
               </span>
               <span className="live-dot" style={{ marginTop: 6 }}>
-                Testnet · block {heads?.finalized ? heads.finalized.toLocaleString('en-US') : '—'}
+                {IS_TESTNET ? 'Testnet' : 'Mainnet'} · block {heads?.finalized ? heads.finalized.toLocaleString('en-US') : '—'}
               </span>
             </div>
 
             <div className="footer-col">
-              <span className="label">Product</span>
+              <span className="label">Platform</span>
               <Link to="/swap">Swap</Link>
               <Link to="/advanced">Advanced Trading</Link>
+              <Link to="/deploy">Create a bot</Link>
               <Link to="/strategies">Strategy catalog</Link>
-              <Link to="/create-token">Create Token</Link>
-              <Link to="/deploy">Launch a bot</Link>
               <Link to="/portfolio">Portfolio</Link>
-              <Link to="/activity">Activity</Link>
+              <Link to="/create-token">Create Token</Link>
             </div>
 
             <div className="footer-col">
-              <span className="label">Explore</span>
-              <Link to="/leaderboard">Wallet leaderboard</Link>
-              <Link to="/activity">Fills ledger</Link>
-              <Link to="/advanced">Advanced trading</Link>
-              <Link to="/how">Documentation</Link>
-            </div>
-
-            <div className="footer-col">
-              <span className="label">Resources</span>
+              <span className="label">Explore &amp; Docs</span>
+              <Link to="/leaderboard">Leaderboard</Link>
+              <Link to="/activity">Activity ledger</Link>
               <Link to="/how">Documentation</Link>
               <a href="https://www.asentum.com/docs" target="_blank" rel="noreferrer">
                 Asentum docs ↗
               </a>
               <a href="https://www.asentum.com/docs/guides/scheduled-calls" target="_blank" rel="noreferrer">
                 Scheduled calls ↗
-              </a>
-              <a href={REPO} target="_blank" rel="noreferrer">
-                Source repository ↗
               </a>
             </div>
 
@@ -333,21 +323,28 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <a href="https://auras.finance" target="_blank" rel="noreferrer">
                 Auras Finance ↗
               </a>
-              <a href="https://asepad.fun" target="_blank" rel="noreferrer">AsePad / AseDex ↗</a>
-              <span className="muted">Primary market data: Auras · additional venue: AseDex</span>
-              <a href="https://explorer.asentum.com" target="_blank" rel="noreferrer">
+              <a href="https://asepad.fun" target="_blank" rel="noreferrer">
+                AsePad / AseDex ↗
+              </a>
+              <a href="https://perps.asepad.fun" target="_blank" rel="noreferrer">
+                AsePad Perps ↗
+              </a>
+              <a href={EXPLORER_URL} target="_blank" rel="noreferrer">
                 Explorer ↗
+              </a>
+              <a href={REPO} target="_blank" rel="noreferrer">
+                GitHub ↗
               </a>
             </div>
           </div>
 
           <div className="footer-bottom">
-            <span>Strata · experimental testnet software, not investment advice.</span>
+            <span>Strata · {IS_TESTNET ? 'experimental testnet software' : 'non-custodial on-chain automation'}, not investment advice.</span>
             <div className="footer-socials">
               <a className="social-link" href={REPO} target="_blank" rel="noreferrer" aria-label="Strata on GitHub" title="GitHub"><GitHubIcon /></a>
               <a className="social-link" href="https://x.com/search?q=StrataDEX" target="_blank" rel="noreferrer" aria-label="Find Strata on X" title="Strata on X"><XIcon /></a>
             </div>
-            <span className="mono">chain 1423 · ASE native</span>
+            <span className="mono">chain {CHAIN_ID} · ASE native</span>
           </div>
         </div>
       </footer>

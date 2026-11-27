@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
+import { CHAIN_ID, NETWORK } from '../lib/network';
 import { loadAseDexPools, loadPools } from '../lib/registry';
 import { explorerTxUrl, getHeads, toHexAddress } from '../lib/rpc';
 import { fetchUserTokenHoldings, type UserTokenHolding } from '../lib/userStrategies';
@@ -19,6 +20,7 @@ import {
 } from '../lib/router';
 import { reconcileSwaps, saveSwap, type SwapHistoryRecord } from '../lib/swapHistory';
 import { TokenMark } from '../components/TokenMark';
+import { InfoTip } from '../components/InfoTip';
 
 const SLIPPAGE_KEY = 'strata:slippage-bps';
 const SLIPPAGE_PRESETS = [10, 50, 100];
@@ -318,12 +320,18 @@ export function Swap() {
     resetQuote();
   };
 
-  const setMax = () => {
+  const setPercent = (pct: number) => {
     if (walletBalanceIn <= 0n) return;
+    const reserve = tokenIn.isNative && pct === 100 && walletBalanceIn > 50_000_000_000_000_000n
+      ? 50_000_000_000_000_000n
+      : 0n;
+    const usable = walletBalanceIn > reserve ? walletBalanceIn - reserve : walletBalanceIn;
+    const target = pct === 100 ? usable : (usable * BigInt(pct)) / 100n;
+    if (target <= 0n) return;
     const decimals = tokenIn.decimals;
     const scale = 10n ** BigInt(decimals);
-    const whole = walletBalanceIn / scale;
-    const fraction = (walletBalanceIn % scale).toString().padStart(decimals, '0').slice(0, 8).replace(/0+$/, '');
+    const whole = target / scale;
+    const fraction = (target % scale).toString().padStart(decimals, '0').slice(0, 8).replace(/0+$/, '');
     setAmount(`${whole}${fraction ? `.${fraction}` : ''}`);
   };
 
@@ -442,24 +450,31 @@ export function Swap() {
   return (
     <>
       <section className="wrap detail-head swap-head">
-        <div className="swap-head-grid">
+        <div className="advanced-head">
           <div>
-            <span className="label">Swap · Asentum testnet</span>
+            <span className="label">Swap · {NETWORK.shortLabel}</span>
             <h1 className="detail-title">Swap at the best price.</h1>
-            <p className="section-note" style={{ maxWidth: 560, marginTop: 16 }}>
-              Strata quotes every live pool on Auras and AseDex, then executes the route that pays the most.
-              Token-to-token trades route through ASE automatically.
+            <p className="section-note" style={{ marginTop: 8 }}>
+              Automatic best-price routing across Auras and AseDex pools.
+              <InfoTip
+                label="How routing works"
+                text="Strata quotes every live pool on Auras and AseDex and executes whichever route pays the most. Token-to-token pairs route through ASE automatically."
+              />
             </p>
-            <Link className="btn btn-ghost btn-sm" to="/advanced" style={{ marginTop: 14 }}>
-              Charts &amp; advanced orders →
+            <div className="meta-strip">
+              <span className="meta-strip-item">Network <strong>Asentum · {CHAIN_ID}</strong></span>
+              <span className="meta-strip-item">Block <strong className="mono">{heads.data ? heads.data.finalized.toLocaleString('en-US') : '—'}</strong></span>
+              <span className="meta-strip-item">Live pools <strong className="mono">{fmtNum((pools.data?.length ?? 0) + (asedexPools.data?.length ?? 0))}</strong></span>
+            </div>
+          </div>
+          <div className="advanced-head-actions">
+            <Link className="btn btn-ghost btn-sm" to="/advanced">
+              Charts &amp; limit orders →
+            </Link>
+            <Link className="btn btn-primary btn-sm" to="/deploy">
+              Automate with a bot
             </Link>
           </div>
-          <dl className="swap-net">
-            <div><dt>Network</dt><dd>Asentum · chain 1423</dd></div>
-            <div><dt>Block</dt><dd className="mono">{heads.data ? heads.data.finalized.toLocaleString('en-US') : '—'}</dd></div>
-            <div><dt>Live pools</dt><dd className="mono">{fmtNum((pools.data?.length ?? 0) + (asedexPools.data?.length ?? 0))}</dd></div>
-            <div><dt>Router</dt><dd>Best of both AMMs</dd></div>
-          </dl>
         </div>
       </section>
 
@@ -468,12 +483,14 @@ export function Swap() {
           <div className="swap-column">
             <div className="swap-frame">
               <div className="swap-frame-head">
-                <span className="label">Exchange</span>
+                <span className="label">Spot Swap</span>
                 <div className="swap-frame-tools">
                   <span className="mono swap-venue-tag">{route ? routeLabel(route) : 'Auto route'}</span>
-                  <span className="mono swap-fee-tag">
-                    {route ? `${route.legs.length} hop${route.legs.length > 1 ? 's' : ''}` : '—'}
-                  </span>
+                  {route && (
+                    <span className="mono swap-fee-tag">
+                      {`${route.legs.length} hop${route.legs.length > 1 ? 's' : ''}`}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -483,7 +500,13 @@ export function Swap() {
                   <span className="swap-balance">
                     Balance {formatUnits(walletBalanceIn, tokenIn.decimals, 4)}
                     {wallet.connected && walletBalanceIn > 0n && (
-                      <button type="button" className="swap-max" onClick={setMax}>MAX</button>
+                      <span className="pct-row" style={{ marginLeft: 8 }}>
+                        {[25, 50, 75, 100].map((pct) => (
+                          <button key={pct} type="button" className="pct-btn" onClick={() => setPercent(pct)}>
+                            {pct === 100 ? 'MAX' : `${pct}%`}
+                          </button>
+                        ))}
+                      </span>
                     )}
                   </span>
                 </div>
@@ -779,16 +802,18 @@ export function Swap() {
               </div>
             )}
 
-            <div className="swap-aside-block">
-              <span className="label">How it executes</span>
-              <ul className="swap-checklist">
-                <li>Both AMMs are quoted for every hop; the larger output wins.</li>
-                <li>Token pairs without a direct pool route through ASE in two swaps.</li>
-                <li>Each leg carries its own on-chain minimum-output guard.</li>
-                <li>Strata never holds keys and never sends a transaction without your wallet confirmation.</li>
-              </ul>
-              <Link className="link-arrow" to="/how">Read the execution guide →</Link>
-            </div>
+            <details className="soft-details">
+              <summary>How swaps execute</summary>
+              <div className="soft-details-body">
+                <ul className="swap-checklist" style={{ marginBottom: 10 }}>
+                  <li>Both AMMs are quoted for every hop; the larger output wins.</li>
+                  <li>Token pairs without a direct pool route through ASE in two swaps.</li>
+                  <li>Each leg carries its own on-chain minimum-output guard.</li>
+                  <li>Strata never holds keys and never sends a transaction without your wallet confirmation.</li>
+                </ul>
+                <Link className="link-arrow" to="/how">Read the execution guide →</Link>
+              </div>
+            </details>
           </aside>
         </div>
       </section>

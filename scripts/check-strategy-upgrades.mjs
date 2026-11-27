@@ -28,4 +28,13 @@ assert.match(pnl, /tokenIn/);
 assert.match(marketplace, /\['1', '2'\]/);
 assert.match(marketplace, /buyBudgetAseWei/);
 assert.match(marketPage, /config.buySizeAseWei/);
+const hub = read('contracts/strata-hub.js');
+const botLifecycle = read('src/lib/botLifecycle.ts');
+for (const name of ['perp-dca', 'perp-trigger', 'perp-grid', 'perp-risk', 'perp-twap', 'perp-momentum']) {
+  const src = read(`contracts/${name}.js`);
+  assert.match(src, /closePosition\(/);
+  assert.match(src, /withdraw\(to,\s*amountWei\)/);
+  assert.match(hub, new RegExp(`'${name}'`));
+}
+assert.match(botLifecycle, /closePosition/);
 console.log('strategy-upgrade static checks: PASS');

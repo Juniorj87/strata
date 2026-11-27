@@ -354,6 +354,269 @@ assert.match(pnl, /unmatchedOutbound/);
 assert.match(rpc, /const isAsePair = \(t0 === NATIVE && t1 !== NATIVE\) \|\| \(t1 === NATIVE && t0 !== NATIVE\)/);
 assert.match(registry, /const amt = 10n \*\* BigInt\(tokenDecimals\)/);
 
+// ── AsePad Perps contract simulation harness ─────────────────────────────────
+const PERPS_CFG = '0x37d25f3a292f0642af72d6f161eafb18c76e16a6';
+const PERPS_MARKETS = '0x71c380f6e384af3513a194e3fde97a2c9991e77d';
+const PERPS_VAULT = '0x1449cbdaf9e42f45b7d5c655ad6322b79d02123a';
+const PERPS_ENGINE = '0x36fc2b3b9a705f78cb5a560b057c4daeaa9b3325';
+const PERPS_ORACLE = '0xd5267504381a2160ff9a64f2f2b97cb174963e20';
+
+function createPerpRuntime(contractName, initialMark = 2n * UNIT) {
+  const store = new Map();
+  const events = [];
+  const jobs = new Map();
+  const engineOps = [];
+  let nextJob = 1;
+  const market = {
+    mark: BigInt(initialMark),
+    healthy: true,
+    collateral: 0n,
+    usedMargin: 0n,
+    sizeWei: 0n,
+    entryPrice: 0n,
+    nativeBalance: 0n,
+    withdrawnToOwner: 0n,
+  };
+  const storage = {
+    has: (key) => store.has(String(key)),
+    get: (key) => store.get(String(key)),
+    set: (key, value) => store.set(String(key), String(value)),
+  };
+  const ctx = {
+    storage,
+    msg: { sender: OWNER, contractAddress: CONTRACT, value: 0n },
+    chain: { blockTimestamp: 1_700_000_000_000n },
+    assert(condition, message = 'assertion failed') { if (!condition) throw new Error(message); },
+    emit(name, args) { events.push({ name, args }); },
+    transfer(_to, amount) {
+      const value = BigInt(amount);
+      assert.ok(market.nativeBalance >= value, 'contract ASE balance too low');
+      market.nativeBalance -= value;
+      market.withdrawnToOwner += value;
+    },
+    E(address, callOptions = {}) {
+      const target = String(address).toLowerCase();
+      if (target === PERPS_CFG) {
+        return {
+          module(name) {
+            if (name === 'markets') return PERPS_MARKETS;
+            if (name === 'vault') return PERPS_VAULT;
+            if (name === 'engine') return PERPS_ENGINE;
+            if (name === 'oracle') return PERPS_ORACLE;
+            throw new Error(`unknown perps module ${name}`);
+          },
+          marketParam(_mid, key) {
+            if (key === 'initialMarginBps') return '1000'; // 10x max
+            if (key === 'minOrderNotionalWei') return String(UNIT / 10n);
+            return '0';
+          },
+        };
+      }
+      if (target === PERPS_MARKETS) {
+        return {
+          get(mid) {
+            return JSON.stringify({ id: String(mid), state: 'ACTIVE', quote: NATIVE, poolId: '1', token: TOKEN });
+          },
+        };
+      }
+      if (target === PERPS_ORACLE) {
+        return {
+          mark() { return JSON.stringify({ healthy: market.healthy, price: market.mark.toString() }); },
+        };
+      }
+      if (target === PERPS_VAULT) {
+        return {
+          deposit(_mid, amountWei) {
+            const amt = BigInt(amountWei);
+            assert.equal(BigInt(callOptions.value ?? 0), amt, 'vault deposit value mismatch');
+            assert.ok(market.nativeBalance >= amt, 'insufficient native balance for deposit');
+            market.nativeBalance -= amt;
+            market.collateral += amt;
+          },
+          withdraw(_mid, amountWei) {
+            const amt = BigInt(amountWei);
+            const free = market.collateral > market.usedMargin ? market.collateral - market.usedMargin : 0n;
+            assert.ok(amt <= free, 'cannot withdraw locked margin');
+            market.collateral -= amt;
+            market.nativeBalance += amt;
+          },
+          freeCollateral() {
+            const free = market.collateral > market.usedMargin ? market.collateral - market.usedMargin : 0n;
+            return free.toString();
+          },
+          position() {
+            return JSON.stringify({ sizeWei: market.sizeWei.toString(), entryPrice: market.entryPrice.toString() });
+          },
+        };
+      }
+      if (target === PERPS_ENGINE) {
+        return {
+          openMarket(_mid, side, sizeWei, _worstPx, tag) {
+            const sz = BigInt(sizeWei);
+            const isLong = String(side).toUpperCase() === 'LONG';
+            market.sizeWei = isLong ? sz : -sz;
+            market.entryPrice = market.mark;
+            const notional = (sz * market.mark) / UNIT;
+            market.usedMargin += notional / 3n;
+            engineOps.push({ op: 'openMarket', side, sizeWei: sz, tag });
+          },
+          increase(_mid, sizeWei) {
+            const sz = BigInt(sizeWei);
+            market.sizeWei += market.sizeWei >= 0n ? sz : -sz;
+            const notional = (sz * market.mark) / UNIT;
+            market.usedMargin += notional / 3n;
+            engineOps.push({ op: 'increase', sizeWei: sz });
+          },
+          reduce(_mid, sizeWei) {
+            const sz = BigInt(sizeWei);
+            const abs = market.sizeWei < 0n ? -market.sizeWei : market.sizeWei;
+            const nextAbs = abs > sz ? abs - sz : 0n;
+            market.sizeWei = market.sizeWei >= 0n ? nextAbs : -nextAbs;
+            if (nextAbs === 0n) market.usedMargin = 0n;
+            else market.usedMargin = market.usedMargin / 2n;
+            engineOps.push({ op: 'reduce', sizeWei: sz });
+          },
+          close() {
+            market.sizeWei = 0n;
+            market.usedMargin = 0n;
+            engineOps.push({ op: 'close' });
+          },
+        };
+      }
+      if (target === CRON) {
+        return {
+          schedule(_target, _method, _args, _nextRunAt, _interval, maxRuns, gasLimit) {
+            const id = String(nextJob++);
+            jobs.set(id, { id, maxRuns: String(maxRuns), gasLimit: String(gasLimit) });
+            market.nativeBalance -= BigInt(callOptions.value ?? 0);
+            return id;
+          },
+          getJob(id) { return jobs.has(String(id)) ? JSON.stringify(jobs.get(String(id))) : null; },
+          cancel(id) { jobs.delete(String(id)); return true; },
+        };
+      }
+      throw new Error(`unexpected perp contract call: ${address}`);
+    },
+  };
+  const source = readFileSync(resolve(ROOT, 'contracts', `${contractName}.js`), 'utf8');
+  const contract = vm.runInNewContext(source, ctx, { filename: `${contractName}.js` });
+  function setSender(sender, value = 0n) {
+    ctx.msg.sender = sender;
+    ctx.msg.value = BigInt(value);
+    if (sender !== CRON) market.nativeBalance += BigInt(value);
+  }
+  function status() { return JSON.parse(contract.getStatus()); }
+  return { contract, market, events, jobs, engineOps, store, ctx, setSender, status };
+}
+
+// Perp DCA: executes 2 legs up to totalMarginWei, auto-stops Cron, then owner closes position & withdraws.
+{
+  const perpDca = createPerpRuntime('perp-dca');
+  const legMargin = UNIT;
+  const totalMargin = 2n * UNIT;
+  const escrow = 5_000_000n;
+  perpDca.setSender(OWNER, totalMargin + escrow);
+  perpDca.contract.init('1', 'LONG', '3', String(legMargin), String(totalMargin), '300', '0', '0', PERPS_CFG);
+  perpDca.setSender(CRON);
+  perpDca.contract.tick();
+  perpDca.setSender(CRON);
+  perpDca.contract.tick();
+  assert.equal(perpDca.status().legs, '2');
+  assert.equal(perpDca.status().stopped, 'true');
+  assert.equal(perpDca.jobs.size, 0);
+  assert.ok(perpDca.market.sizeWei > 0n, 'Perp DCA opened LONG position');
+  perpDca.setSender(OWNER);
+  perpDca.contract.closePosition();
+  assert.equal(perpDca.market.sizeWei, 0n);
+  assert.equal(perpDca.market.collateral, 0n);
+  perpDca.contract.withdraw(OWNER, String(perpDca.market.nativeBalance));
+  assert.equal(perpDca.market.withdrawnToOwner, totalMargin);
+}
+
+// Perp Trigger: waits until target dip is reached, opens LONG, then closes on take-profit.
+{
+  const perpTrigger = createPerpRuntime('perp-trigger', 2n * UNIT);
+  const margin = 2n * UNIT;
+  perpTrigger.setSender(OWNER, margin + 5_000_000n);
+  perpTrigger.contract.init('1', 'LONG', '3', String(margin), '500', 'below', '60', '1000', '500', PERPS_CFG);
+  perpTrigger.setSender(CRON);
+  assert.equal(perpTrigger.contract.tick(), 'waiting');
+  perpTrigger.market.mark = (2n * UNIT * 94n) / 100n; // -6% dip crosses 5% below trigger
+  perpTrigger.setSender(CRON);
+  perpTrigger.contract.tick();
+  assert.equal(perpTrigger.status().entered, 'true');
+  assert.ok(perpTrigger.market.sizeWei > 0n);
+  perpTrigger.market.mark = (perpTrigger.market.entryPrice * 112n) / 100n; // +12% hits 10% TP
+  perpTrigger.setSender(CRON);
+  assert.equal(perpTrigger.contract.tick(), 'take-profit-closed');
+  assert.equal(perpTrigger.status().stopped, 'true');
+  assert.equal(perpTrigger.market.sizeWei, 0n);
+}
+
+// Perp Grid: scales in on adverse step and reduces on +step rebound.
+{
+  const perpGrid = createPerpRuntime('perp-grid', 2n * UNIT);
+  perpGrid.setSender(OWNER, 4n * UNIT + 5_000_000n);
+  perpGrid.contract.init('1', 'LONG', '3', '200', '4', String(4n * UNIT), '60', PERPS_CFG);
+  perpGrid.market.mark = (2n * UNIT * 97n) / 100n; // -3% hits first -2% level
+  perpGrid.setSender(CRON);
+  perpGrid.contract.tick();
+  assert.equal(perpGrid.status().activeLevels, '1');
+  perpGrid.market.mark = (2n * UNIT * 100n) / 100n; // +3% above entry hits +2% TP
+  perpGrid.setSender(CRON);
+  perpGrid.contract.tick();
+  assert.equal(perpGrid.status().activeLevels, '0');
+  assert.equal(perpGrid.market.sizeWei, 0n);
+}
+
+// Perp Risk: opens guarded position, tracks bestPrice, exits on trailing drawdown.
+{
+  const perpRisk = createPerpRuntime('perp-risk', 2n * UNIT);
+  perpRisk.setSender(OWNER, 2n * UNIT + 5_000_000n);
+  perpRisk.contract.init('1', 'LONG', '3', String(2n * UNIT), '500', '2000', '500', '60', PERPS_CFG);
+  perpRisk.setSender(CRON);
+  perpRisk.contract.tick();
+  assert.equal(perpRisk.status().entered, 'true');
+  perpRisk.market.mark = (2n * UNIT * 110n) / 100n; // new peak
+  perpRisk.setSender(CRON);
+  assert.equal(perpRisk.contract.tick(), 'guarding');
+  perpRisk.market.mark = (2n * UNIT * 104n) / 100n; // >5% drop from 2.2 peak
+  perpRisk.setSender(CRON);
+  assert.equal(perpRisk.contract.tick(), 'trailing-drawdown');
+  assert.equal(perpRisk.status().stopped, 'true');
+  assert.equal(perpRisk.market.sizeWei, 0n);
+}
+
+// Perp TWAP: executes all slices and cancels Cron on completion.
+{
+  const perpTwap = createPerpRuntime('perp-twap', 2n * UNIT);
+  perpTwap.setSender(OWNER, 3n * UNIT + 5_000_000n);
+  perpTwap.contract.init('1', 'SHORT', '2', String(3n * UNIT), '3', '300', PERPS_CFG);
+  for (let i = 0; i < 3; i += 1) {
+    perpTwap.setSender(CRON);
+    perpTwap.contract.tick();
+  }
+  assert.equal(perpTwap.status().legsDone, '3');
+  assert.equal(perpTwap.status().stopped, 'true');
+  assert.equal(perpTwap.jobs.size, 0);
+  assert.ok(perpTwap.market.sizeWei < 0n, 'Perp TWAP opened SHORT position');
+}
+
+// Perp Momentum: opens LONG on upward move and closes on downward reversal.
+{
+  const perpMom = createPerpRuntime('perp-momentum', 2n * UNIT);
+  perpMom.setSender(OWNER, 2n * UNIT + 5_000_000n);
+  perpMom.contract.init('1', '3', String(2n * UNIT), '200', '60', PERPS_CFG);
+  perpMom.market.mark = (2n * UNIT * 103n) / 100n; // +3% >= 200 bps
+  perpMom.setSender(CRON);
+  assert.equal(perpMom.contract.tick(), 'opened-long');
+  assert.ok(perpMom.market.sizeWei > 0n);
+  perpMom.market.mark = (perpMom.market.mark * 97n) / 100n; // -3% <= -200 bps
+  perpMom.setSender(CRON);
+  assert.equal(perpMom.contract.tick(), 'closed-long');
+  assert.equal(perpMom.market.sizeWei, 0n);
+}
+
 console.log('Trading lifecycle simulation: PASS');
 console.log('• Price normalization: both pool orientations across Grid, Risk Manager, Scale and Limit Trigger');
 console.log('• Momentum Signal: correct cumulative-price side and a complete three-tick TWAP signal cycle');
@@ -363,3 +626,4 @@ console.log('• TWAP: failed-swap rollback + retry, 333 + 333 + 334 slices, can
 console.log('• Risk Manager: latched stop-loss / take-profit / drawdown exits, per-run size cap and daily-loss pause');
 console.log('• Scale: one bounded swap per Cron tick');
 console.log('• PnL: incomplete indexed event ranges cannot be shown as complete net PnL');
+console.log('• AsePad Perps: perp-dca, perp-trigger, perp-grid, perp-risk, perp-twap & perp-momentum lifecycles');

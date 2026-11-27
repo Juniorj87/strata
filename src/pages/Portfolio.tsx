@@ -2,12 +2,24 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
+import { NETWORK } from '../lib/network';
 import { loadPools, loadAseDexPools, loadLocalStrategies, type LivePool } from '../lib/registry';
 import { explorerAddressUrl, explorerTxUrl, toAse1, toHexAddress } from '../lib/rpc';
 import { fmtWei, formatUnits, parseUnits, shortAddr, weiToAse } from '../lib/format';
-import { botTypeFor, templateById } from '../lib/templates';
+import { botTypeFor, isPerpTemplate, templateById } from '../lib/templates';
 import { closeBot } from '../lib/botLifecycle';
+import {
+  PERPS_APP_URL,
+  cancelPerpsNativeOrder,
+  closePerpsPositionTx,
+  loadPerpsMarkets,
+  loadPerpsOpenOrdersForOwner,
+  loadPerpsPositionsForOwner,
+  perpsPriceToNumber,
+  type PerpsPosition,
+} from '../lib/perps';
 import { WalletRegistryPanel } from '../components/WalletRegistryPanel';
+import { InfoTip } from '../components/InfoTip';
 import {
   fetchUserTokenHoldings,
   getUserStrategies,
@@ -66,11 +78,20 @@ function planLabel(record: DeployedStrategyRecord): string {
     case 'scale': return 'Sell ladder';
     case 'momentum-trader': return 'Momentum sells';
     case 'momentum-signal': return 'Signal only';
+    case 'perp-dca': return `${record.side ?? 'LONG'} ${record.leverage ?? 1}x · every ${everyLabel(record.interval)}`;
+    case 'perp-trigger': return `${record.side ?? 'LONG'} ${record.leverage ?? 1}x · price trigger`;
+    case 'perp-grid': return `${record.side ?? 'LONG'} ${record.leverage ?? 1}x · ${record.threshold ? `${Number(record.threshold) / 100}%` : ''} perp grid`.trim();
+    case 'perp-risk': return `${record.side ?? 'LONG'} ${record.leverage ?? 1}x · SL/TP guard`;
+    case 'perp-twap': return `${record.side ?? 'LONG'} ${record.leverage ?? 1}x · ${record.slices ?? 'N'} slices`;
+    case 'perp-momentum': return `${record.leverage ?? 1}x · momentum flip`;
     default: return 'Custom contract';
   }
 }
 
 function amountLabel(record: DeployedStrategyRecord): string {
+  if (isPerpTemplate(record.template)) {
+    return `${record.budget || '—'} ASE margin${record.leverage ? ` · ${record.leverage}x` : ''}`;
+  }
   if (record.template === 'dca') return `${record.buyBudgetAse || record.budget || '—'} ASE`;
   if (record.template === 'grid') {
     return `${record.budget || '—'} ${record.tokenSymbol || ''}${record.buyBudgetAse ? ` + ${record.buyBudgetAse} ASE` : ''}`.trim();
@@ -124,6 +145,21 @@ export function Portfolio() {
     true,
     wallet.address,
   );
+  const perpsMarketsState = useAsync(() => loadPerpsMarkets(), 30_000, Boolean(wallet.connected));
+  const perpsPositionsState = useAsync(
+    () => (wallet.connected && wallet.address ? loadPerpsPositionsForOwner(wallet.address) : Promise.resolve([])),
+    20_000,
+    Boolean(wallet.connected && wallet.address),
+    wallet.address ?? '',
+  );
+  const perpsOrdersState = useAsync(
+    () => (wallet.connected && wallet.address ? loadPerpsOpenOrdersForOwner(wallet.address) : Promise.resolve([])),
+    20_000,
+    Boolean(wallet.connected && wallet.address),
+    wallet.address ?? '',
+  );
+  const [perpBusy, setPerpBusy] = useState<string | null>(null);
+  const [perpMessage, setPerpMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const allPools = useMemo(
     () => [...(pools.data ?? []), ...(asedexPools.data ?? [])],
@@ -174,22 +210,34 @@ export function Portfolio() {
     setStopping(record.address);
     notice('ok', alreadyStopped ? 'Reading what is left in the bot…' : 'Closing the bot — approve each wallet prompt as it appears…');
     try {
+      const isPerp = isPerpTemplate(record.template) || record.venue === 'asepad-perps';
+      const liveMatch = (liveStrategies.data ?? []).find(
+        (item) => item.address.toLowerCase() === record.address.toLowerCase(),
+      );
       const result = await closeBot({
         client,
         contract: record.address,
         balanceAddress: toHexAddress(record.address),
         recipient,
         token: record.tokenAddress || null,
-        supportsTokenWithdraw: record.template !== 'momentum-signal',
+        supportsTokenWithdraw: !isPerp && record.template !== 'momentum-signal',
+        supportsPerpClose: isPerp,
+        perpMarketId: record.marketId ?? liveMatch?.marketId ?? null,
         needsStop: !alreadyStopped,
         onProgress: (text) => notice('ok', text),
         onStopped: () => saveUserStrategy({ ...record, status: 'stopped' }),
         onStep: (method, hash) => {
           saveUserTx(owner, {
             hash,
-            type: method === 'stop' ? 'cancel' : 'withdraw',
+            type: method === 'stop' ? 'cancel' : method === 'closePosition' ? 'perps' : 'withdraw',
             description: `${
-              method === 'stop' ? 'Stop' : method === 'withdraw' ? 'Withdraw ASE from' : 'Reclaim tokens from'
+              method === 'stop'
+                ? 'Stop'
+                : method === 'closePosition'
+                  ? 'Close perp position & reclaim vault margin from'
+                  : method === 'withdraw'
+                    ? 'Withdraw ASE from'
+                    : 'Reclaim tokens from'
             } ${record.templateName ?? record.template} bot`,
             timestamp: Date.now(),
             status: 'confirmed',
@@ -317,12 +365,59 @@ export function Portfolio() {
 
   const totalAseInBots = useMemo(() => {
     return userLiveStrategies.reduce((acc, { live }) => {
-      if (live?.balanceAse) {
-        return acc + BigInt(live.balanceAse);
-      }
-      return acc;
+      let sum = acc;
+      if (live?.balanceAse) sum += BigInt(live.balanceAse);
+      if (live?.perpPosition?.collateralWei) sum += BigInt(live.perpPosition.collateralWei);
+      return sum;
     }, 0n);
   }, [userLiveStrategies]);
+
+  const handleClosePerpPosition = async (pos: PerpsPosition) => {
+    if (!wallet.connected || !wallet.address) return;
+    const mkt = (perpsMarketsState.data ?? []).find((m) => m.id === pos.marketId);
+    if (!mkt) return;
+    setPerpBusy(`pos:${pos.marketId}`);
+    setPerpMessage(null);
+    try {
+      const txHash = await closePerpsPositionTx(client, pos.marketId, BigInt(pos.sizeWei), BigInt(mkt.markPriceWei), 300);
+      saveUserTx(wallet.address, {
+        hash: txHash,
+        type: 'perps',
+        description: `Close ${pos.symbol}/ASE ${pos.side.toUpperCase()} perp position`,
+        timestamp: Date.now(),
+        status: 'confirmed',
+      });
+      setPerpMessage({ kind: 'ok', text: `Closed ${pos.symbol}/ASE position.` });
+      perpsPositionsState.refresh();
+      void refreshHoldings();
+    } catch (err) {
+      setPerpMessage({ kind: 'err', text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setPerpBusy(null);
+    }
+  };
+
+  const handleCancelPerpOrder = async (orderId: string) => {
+    if (!wallet.connected || !wallet.address) return;
+    setPerpBusy(`ord:${orderId}`);
+    setPerpMessage(null);
+    try {
+      const txHash = await cancelPerpsNativeOrder(client, orderId);
+      saveUserTx(wallet.address, {
+        hash: txHash,
+        type: 'perps',
+        description: `Cancel AsePad Perps order #${orderId}`,
+        timestamp: Date.now(),
+        status: 'confirmed',
+      });
+      setPerpMessage({ kind: 'ok', text: `Cancelled AsePad Perps order #${orderId}.` });
+      perpsOrdersState.refresh();
+    } catch (err) {
+      setPerpMessage({ kind: 'err', text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setPerpBusy(null);
+    }
+  };
 
   const totalGrossProceeds = useMemo(() => {
     return userLiveStrategies.reduce((acc, { live }) => {
@@ -372,7 +467,7 @@ export function Portfolio() {
     return (
       <section className="wrap" style={{ paddingTop: 70, paddingBottom: 100 }}>
         <div className="detail-head" style={{ paddingTop: 0 }}>
-          <span className="label">Portfolio · Asentum testnet</span>
+          <span className="label">Portfolio · {NETWORK.shortLabel}</span>
           <h1 className="detail-title">Your capital, in one view.</h1>
           <p className="section-note" style={{ maxWidth: 620 }}>
             Connect a wallet to see balances, the bots you run, the capital committed to them and every
@@ -411,14 +506,13 @@ export function Portfolio() {
 
   return (
     <>
-      <section className="wrap detail-head">
+      <section className="wrap detail-head" style={{ paddingTop: 26, paddingBottom: 16 }}>
         <div className="pf-head">
           <div>
-            <span className="label">Portfolio · Asentum testnet</span>
-            <h1 className="detail-title" style={{ marginBottom: 10 }}>My portfolio</h1>
+            <span className="label">Portfolio · {NETWORK.shortLabel}</span>
+            <h1 className="detail-title" style={{ marginBottom: 8 }}>My portfolio</h1>
             <p className="section-note" style={{ maxWidth: 560 }}>
-              Balances, running bots and their history. Every bot is a contract you own — nothing is held by a
-              server.
+              Balances, running bots and on-chain history—non-custodial, owned by your wallet.
             </p>
           </div>
           <Link className="btn btn-primary" to="/deploy">
@@ -447,14 +541,18 @@ export function Portfolio() {
           return (
             <div className="pf-value">
               <div>
-                <span className="label">Wallet value if sold now</span>
+                <span className="label">
+                  Wallet value if sold now
+                  <InfoTip
+                    label="AMM valuation method"
+                    text="Calculated from full-size AMM quotes (after price impact and pool fees) for every held token plus ASE inside your bot contracts—not spot price × quantity."
+                  />
+                </span>
                 <strong>
                   {totalValue > 0 ? `${totalValue.toLocaleString('en-US', { maximumFractionDigits: 2 })} ASE` : '—'}
                 </strong>
                 <small>
-                  Full-size AMM quote for every token balance — what the pool would actually pay after price
-                  impact and fees — plus ASE held by your contracts. Spot price × quantity is not used, because a
-                  large balance in a shallow pool is worth much less than its spot mark.
+                  Realisable AMM quote after price impact + ASE held by your bots.
                 </small>
               </div>
               <div className="pf-value-side">
@@ -476,29 +574,29 @@ export function Portfolio() {
           );
         })()}
 
-        <div className="balance-hero">
-          <div>
+        <div className="kpi-strip" style={{ marginTop: 22 }}>
+          <div className="kpi-card">
             <span className="label">ASE in wallet</span>
-            <strong>{nativeHolding ? nativeHolding.balanceFmt : '—'}</strong>
+            <strong className="mono">{nativeHolding ? nativeHolding.balanceFmt : '—'}</strong>
             <small>Native balance ready to trade</small>
           </div>
-          <div>
+          <div className="kpi-card">
             <span className="label">Capital in bots</span>
-            <strong style={{ color: totalAseInBots > 0n ? 'var(--accent)' : undefined }}>
+            <strong className="mono" style={{ color: totalAseInBots > 0n ? 'var(--accent)' : undefined }}>
               {totalAseInBots > 0n ? fmtWei(totalAseInBots, 2) : '0 ASE'}
             </strong>
             <small>Locked inside active contracts</small>
           </div>
-          <div>
+          <div className="kpi-card">
             <span className="label">Gross proceeds</span>
-            <strong style={{ color: totalGrossProceeds > 0n ? 'var(--up)' : undefined }}>
+            <strong className="mono" style={{ color: totalGrossProceeds > 0n ? 'var(--up)' : undefined }}>
               {totalGrossProceeds > 0n ? fmtWei(totalGrossProceeds, 2) : '0 ASE'}
             </strong>
             <small>Total ASE received from fills</small>
           </div>
-          <div>
+          <div className="kpi-card">
             <span className="label">Bots running</span>
-            <strong>{runningBots}</strong>
+            <strong className="mono">{runningBots}</strong>
             <small>
               {userStrategies.length} total · {botsToFinish > 0 ? `${botsToFinish} unarmed` : 'all armed'}
             </small>
@@ -536,24 +634,25 @@ export function Portfolio() {
           </div>
         )}
 
-        <div className="mode-switch" role="tablist" aria-label="Portfolio sections">
-          <button type="button" role="tab" aria-selected={activeTab === 'tokens'} className={activeTab === 'tokens' ? 'mode-option active' : 'mode-option'} onClick={() => setActiveTab('tokens')}>
-            <span>Assets ({tokenHoldings.length + (nativeHolding ? 1 : 0)})</span>
-            <small>Wallet balances</small>
+        <div className="seg-tabs" role="tablist" aria-label="Portfolio sections">
+          <button type="button" role="tab" aria-selected={activeTab === 'tokens'} className={activeTab === 'tokens' ? 'seg-tab active' : 'seg-tab'} onClick={() => setActiveTab('tokens')}>
+            Assets
+            <span className="seg-tab-count">{tokenHoldings.length + (nativeHolding ? 1 : 0)}</span>
           </button>
-          <button type="button" role="tab" aria-selected={activeTab === 'bots'} className={activeTab === 'bots' ? 'mode-option active' : 'mode-option'} onClick={() => setActiveTab('bots')}>
-            <span>Bots ({userStrategies.length})</span>
-            <small>Manage & withdraw</small>
+          <button type="button" role="tab" aria-selected={activeTab === 'bots'} className={activeTab === 'bots' ? 'seg-tab active' : 'seg-tab'} onClick={() => setActiveTab('bots')}>
+            Bots
+            <span className="seg-tab-count">{userStrategies.length}</span>
           </button>
-          <button type="button" role="tab" aria-selected={activeTab === 'activity'} className={activeTab === 'activity' ? 'mode-option active' : 'mode-option'} onClick={() => setActiveTab('activity')}>
-            <span>Activity ({userTxs.length})</span>
-            <small>Transactions</small>
+          <button type="button" role="tab" aria-selected={activeTab === 'activity'} className={activeTab === 'activity' ? 'seg-tab active' : 'seg-tab'} onClick={() => setActiveTab('activity')}>
+            Activity
+            <span className="seg-tab-count">{userTxs.length}</span>
           </button>
         </div>
       </section>
 
       <section className="wrap" style={{ paddingBottom: 96 }}>
         {activeTab === 'tokens' && (
+          <>
           <div className="panel">
             <div className="panel-head">
               <div>
@@ -657,16 +756,101 @@ export function Portfolio() {
               </div>
             )}
           </div>
+
+          <div className="panel" style={{ marginTop: 20 }}>
+            <div className="panel-head">
+              <div>
+                <span className="label">AsePad Perps · Vault Positions &amp; Native Orders</span>
+                <p className="muted" style={{ marginTop: 4 }}>
+                  Direct leveraged positions and keeper orders on <a href={PERPS_APP_URL} target="_blank" rel="noreferrer" className="link-arrow">perps.asepad.fun ↗</a>.
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <Link to="/advanced?venue=perps" className="btn btn-ghost btn-sm">Perps terminal</Link>
+                <Link to="/deploy?venue=perps" className="btn btn-primary btn-sm">Launch perp bot</Link>
+              </div>
+            </div>
+            <div className="panel-body">
+              {perpMessage && (
+                <p className={perpMessage.kind === 'err' ? 'swap-note down' : 'swap-note up'} style={{ marginBottom: 12 }}>
+                  {perpMessage.text}
+                </p>
+              )}
+              {(perpsPositionsState.data ?? []).length === 0 && (perpsOrdersState.data ?? []).length === 0 ? (
+                <p className="muted" style={{ fontSize: 13.5 }}>
+                  No active direct AsePad Perps positions or native orders on this wallet. Autonomous perp contract bots appear in the Bots tab.
+                </p>
+              ) : (
+                <div style={{ display: 'grid', gap: 14 }}>
+                  {(perpsPositionsState.data ?? []).map((pos) => (
+                    <div className="perp-vault-strip" key={pos.id}>
+                      <div>
+                        <strong className={pos.side === 'long' ? 'up' : 'down'}>{pos.side.toUpperCase()} {pos.symbol}/ASE</strong>
+                        <span className="mono muted" style={{ marginLeft: 10 }}>
+                          {pos.size} {pos.symbol} · {pos.leverage}x · Margin {pos.margin} ASE · uPnL {pos.unrealisedPnl >= 0 ? '+' : ''}{pos.unrealisedPnl.toFixed(4)} ASE
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <Link to={`/advanced?venue=perps&market=${pos.marketId}`} className="btn btn-ghost btn-sm">Terminal</Link>
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          disabled={perpBusy === `pos:${pos.marketId}`}
+                          onClick={() => void handleClosePerpPosition(pos)}
+                        >
+                          {perpBusy === `pos:${pos.marketId}` ? 'Closing…' : 'Close position'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {(perpsOrdersState.data ?? []).map((ord) => {
+                    const mkt = (perpsMarketsState.data ?? []).find((m) => m.id === String(ord.marketId));
+                    const px = ord.limitPx !== '0' && mkt
+                      ? perpsPriceToNumber(ord.limitPx, mkt.decimals, mkt.quoteDecimals)
+                      : ord.triggerPx !== '0' && mkt
+                        ? perpsPriceToNumber(ord.triggerPx, mkt.decimals, mkt.quoteDecimals)
+                        : 0;
+                    return (
+                      <div className="perp-vault-strip" key={ord.id}>
+                        <div>
+                          <span className={ord.side === 'LONG' ? 'exec-side is-buy' : 'exec-side is-sell'}>{ord.side}</span>
+                          <strong className="mono" style={{ marginLeft: 8 }}>{ord.kind} #{ord.id}</strong>
+                          <span className="mono muted" style={{ marginLeft: 8 }}>
+                            {mkt ? `${mkt.symbol}/ASE` : `MKT#${ord.marketId}`} · {weiToAse(ord.sizeWei, 3)}
+                            {px > 0 ? ` @ ${px.toPrecision(5)} ASE` : ''}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          className="chip"
+                          disabled={perpBusy === `ord:${ord.id}`}
+                          onClick={() => void handleCancelPerpOrder(ord.id)}
+                        >
+                          {perpBusy === `ord:${ord.id}` ? 'Cancelling…' : 'Cancel order'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+          </>
         )}
 
         {activeTab === 'bots' && (
           <div className="panel">
             <div className="panel-head">
               <div>
-                <span className="label">My bots</span>
+                <span className="label">
+                  My bots
+                  <InfoTip
+                    label="Managing and removing bots"
+                    text="Closing a bot cancels its schedule and returns ASE and tokens to your wallet. Removing a finished bot only hides the record in this browser and never touches the contract."
+                  />
+                </span>
                 <p className="muted" style={{ marginTop: 4 }}>
-                  Close a bot to cancel its schedule and send the ASE and tokens back to your wallet. Finished bots can be
-                  removed from this list — removing only hides the entry in this browser, it never touches the contract.
+                  Close a bot anytime to cancel its schedule and withdraw remaining funds.
                 </p>
               </div>
               <Link to="/deploy" className="btn btn-ghost btn-sm">
@@ -695,7 +879,9 @@ export function Portfolio() {
                     // contract that still has funds inside it.
                     const emptyOnChain = !liveMatch
                       || (BigInt(liveMatch.balanceAse || '0') === 0n
-                        && BigInt(liveMatch.tokenBalance || '0') === 0n);
+                        && BigInt(liveMatch.tokenBalance || '0') === 0n
+                        && BigInt(liveMatch.perpPosition?.collateralWei || '0') === 0n
+                        && BigInt(liveMatch.perpPosition?.sizeWei || '0') === 0n);
                     const stopped = strategy.status === 'stopped'
                       || liveMatch?.stopped === true;
                     const scheduleEnded = liveMatch !== undefined
@@ -713,7 +899,7 @@ export function Portfolio() {
                               {bot?.title ?? strategy.templateName ?? strategy.template}
                             </div>
                             <div className="bot-card-pair">
-                              {strategy.tokenSymbol || 'TOKEN'} / ASE · {strategy.venue === 'asedex' ? 'AseDex' : 'Auras'}
+                              {strategy.tokenSymbol || 'TOKEN'} / ASE · {strategy.venue === 'asepad-perps' ? 'AsePad Perps' : strategy.venue === 'asedex' ? 'AseDex' : 'Auras'}
                             </div>
                           </div>
                           <span className={status.className}>{status.label}</span>
@@ -738,7 +924,7 @@ export function Portfolio() {
                                     return `${trades} of ${totalRuns} buys (${pct}%)`;
                                   }
                                 }
-                                if (strategy.template === 'twap') {
+                                if (strategy.template === 'twap' || strategy.template === 'perp-twap') {
                                   const totalSlices = Number(strategy.slices || '0');
                                   if (totalSlices > 0) {
                                     const pct = Math.min(100, Math.round((trades / totalSlices) * 100));
@@ -759,6 +945,12 @@ export function Portfolio() {
                               })()}
                             </strong>
                           </div>
+                          {liveMatch?.perpPosition && BigInt(liveMatch.perpPosition.collateralWei || '0') > 0n && (
+                            <div>
+                              <span>Vault margin</span>
+                              <strong>{fmtWei(liveMatch.perpPosition.collateralWei, 3)}</strong>
+                            </div>
+                          )}
                           {liveMatch && BigInt(liveMatch.balanceAse || '0') > 0n && (
                             <div>
                               <span>In contract</span>

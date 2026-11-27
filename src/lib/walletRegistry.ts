@@ -14,7 +14,9 @@
  *   - nothing is sent to a server, an analytics tool or a log
  */
 
-const KEY = 'strata:wallet_registry_v1';
+import { chainStorageKey } from './network';
+
+const KEY = chainStorageKey('strata:wallet_registry_v1');
 const MAX_WALLETS = 20;
 
 export interface RegisteredWallet {

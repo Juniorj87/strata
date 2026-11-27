@@ -1,4 +1,5 @@
 import type { AsentumClient } from '@asentum/connect';
+import { chainStorageKey } from './network';
 
 /**
  * ARC-20 token deployment on Asentum.
@@ -122,7 +123,7 @@ export interface Arc20Deployment {
   initTxHash: string;
 }
 
-const DRAFT_KEY = 'strata:token_draft_v1';
+const DRAFT_KEY = chainStorageKey('strata:token_draft_v1');
 
 export interface TokenDraft {
   address: string;

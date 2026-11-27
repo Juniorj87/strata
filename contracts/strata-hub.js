@@ -18,7 +18,7 @@ function lc(value) { return String(value || '').toLowerCase(); }
     const template = String(templateName || '');
     const pool = String(poolId || '1');
     assert(strategy.startsWith('0x') && strategy.length === 42, 'invalid strategy address');
-    assert(['momentum-signal', 'momentum-trader', 'grid', 'twap', 'dca', 'risk-managed', 'scale', 'limit-exit'].includes(template), 'unsupported Strata template');
+    assert(['momentum-signal', 'momentum-trader', 'grid', 'twap', 'dca', 'risk-managed', 'scale', 'limit-exit', 'perp-dca', 'perp-trigger', 'perp-grid', 'perp-risk', 'perp-twap', 'perp-momentum'].includes(template), 'unsupported Strata template');
     assert(!storage.has('strategy:' + strategy + ':owner'), 'strategy already registered');
 
     // A registry entry is only created by the wallet that initialized the strategy.

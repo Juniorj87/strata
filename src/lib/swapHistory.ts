@@ -1,3 +1,4 @@
+import { chainStorageKey } from './network';
 import { getReceipt } from './rpc';
 import { readSwappedAmount } from './swap';
 
@@ -24,7 +25,7 @@ export interface SwapHistoryRecord {
   error?: string;
 }
 
-const KEY = 'strata:swaps:';
+const KEY = chainStorageKey('strata:swaps:');
 
 function keyFor(wallet: string): string {
   return `${KEY}${wallet.toLowerCase()}`;

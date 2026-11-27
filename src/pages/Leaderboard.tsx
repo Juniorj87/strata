@@ -2,10 +2,12 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
+import { NETWORK } from '../lib/network';
 import { loadProtocol, POINTS, strategyRows, walletRows, type StrategyRow, type WalletRow } from '../lib/protocol';
-import { toHexAddress } from '../lib/rpc';
+import { explorerAddressUrl, toHexAddress } from '../lib/rpc';
 import { fmtAgeFrom, fmtNum, fmtWei, formatUnits, shortAddr } from '../lib/format';
 import { botTypeFor } from '../lib/templates';
+import { InfoTip } from '../components/InfoTip';
 
 type SortKey = 'points' | 'running' | 'fills' | 'gross' | 'recent';
 
@@ -42,6 +44,7 @@ export function Leaderboard() {
   const { data, loading, error, refresh } = useAsync(() => loadProtocol(), 30_000);
   const [sortKey, setSortKey] = useState<SortKey>('points');
   const [sortDesc, setSortDesc] = useState(true);
+  const [boardTab, setBoardTab] = useState<'wallets' | 'bots'>('wallets');
   const [strategySort, setStrategySort] = useState<'fills' | 'gross' | 'recent'>('fills');
 
   const wallets = useMemo(() => (data ? walletRows(data) : []), [data]);
@@ -104,23 +107,24 @@ export function Leaderboard() {
   return (
     <>
       <section className="wrap detail-head">
-        <span className="label">Leaderboard · wallets that run bots here</span>
+        <span className="label">Leaderboard · {NETWORK.shortLabel}</span>
         <h1 className="detail-title">
           The wallets behind
           <br />
           the running bots.
         </h1>
-        <p className="section-note" style={{ maxWidth: 680, marginTop: 18 }}>
-          Wallets are ranked, not individual bots: every figure is the sum of the verified Strata contracts that
-          wallet owns, read from their own swap receipts. Gross ASE is proceeds, not profit; open inventory is a
-          live AMM quote. A bot with an ended schedule still counts in its wallet&apos;s history but not in the
-          running count.
+        <p className="section-note" style={{ marginTop: 10 }}>
+          Ranked by verified Strata contract executions and gross ASE volume across every wallet&apos;s bots.
+          <InfoTip
+            label="Ranking rules"
+            text="Every figure sums the verified Strata contracts owned by each wallet from on-chain swap receipts. Gross ASE is proceeds, not profit; open inventory uses a live AMM quote."
+          />
         </p>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 22 }}>
+        <div className="advanced-head-actions" style={{ marginTop: 16 }}>
           <Link className="btn btn-ghost btn-sm" to="/activity">
-            All fills →
+            Fills ledger →
           </Link>
-          <Link className="btn btn-ghost btn-sm" to="/deploy">
+          <Link className="btn btn-primary btn-sm" to="/deploy">
             Launch a bot to earn points
           </Link>
         </div>
@@ -133,9 +137,6 @@ export function Leaderboard() {
           <button type="button" className="chip" onClick={refresh}>
             Refresh
           </button>
-          <Link className="btn btn-ghost btn-sm" to="/activity">
-            Fills ledger →
-          </Link>
         </div>
 
         {error && (
@@ -147,14 +148,14 @@ export function Leaderboard() {
           </div>
         )}
 
-        <div className="panel" style={{ marginBottom: 18 }}>
+        <div className="panel" style={{ marginBottom: 20 }}>
           <div className="panel-body" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' }}>
             <div>
               <span className="label">Your points</span>
-              <strong style={{ display: 'block', fontSize: 30, marginTop: 4 }}>
+              <strong style={{ display: 'block', fontSize: 32, marginTop: 4 }}>
                 {myWallet ? fmtNum(myWallet.points) : wallet.connected ? '0' : '—'}
               </strong>
-              <span className="muted" style={{ fontSize: 13 }}>
+              <span className="muted" style={{ fontSize: 13.5 }}>
                 {!wallet.connected
                   ? 'Connect a wallet to see your points and rank.'
                   : myWallet
@@ -162,45 +163,61 @@ export function Leaderboard() {
                     : 'No verified bot found for this wallet yet. Launch a bot; points appear after its first indexed execution.'}
               </span>
             </div>
-            <div className="muted" style={{ fontSize: 13, lineHeight: 1.7, maxWidth: 380 }}>
+            <div className="muted" style={{ fontSize: 13.5, lineHeight: 1.65, maxWidth: 380 }}>
               <strong style={{ color: 'var(--text)', display: 'block', marginBottom: 3 }}>How points are earned</strong>
               {POINTS.perBot} per launched bot · {POINTS.perFill} per execution · 1 per {POINTS.asePerPoint} ASE received.
-              Only verified on-chain activity counts, so points cannot be claimed by clicking around.
+              Only verified on-chain activity counts.
             </div>
           </div>
         </div>
 
-        <div className="leaderboard-stats">
-          <div className="metric">
+        <div className="kpi-strip">
+          <div className="kpi-card">
             <span className="label">Ranked wallets</span>
-            <strong>{data ? fmtNum(wallets.length) : '—'}</strong>
+            <strong className="mono">{data ? fmtNum(wallets.length) : '—'}</strong>
+            <small>{data ? `${fmtNum(totalPoints)} points awarded` : 'Indexed owners'}</small>
           </div>
-          <div className="metric">
-            <span className="label">Points awarded</span>
-            <strong>{data ? fmtNum(totalPoints) : '—'}</strong>
-          </div>
-          <div className="metric">
+          <div className="kpi-card">
             <span className="label">Bots running</span>
-            <strong>{data ? fmtNum(runningBots) : '—'}</strong>
+            <strong className="mono">{data ? fmtNum(runningBots) : '—'}</strong>
+            <small>Active Cron schedules</small>
           </div>
-          <div className="metric">
+          <div className="kpi-card">
             <span className="label">Executed fills</span>
-            <strong>{stats ? fmtNum(stats.executedFills) : '—'}</strong>
+            <strong className="mono">{stats ? fmtNum(stats.executedFills) : '—'}</strong>
+            <small>{stats?.lastFillAt ? `Last fill ${fmtAgeFrom(stats.lastFillAt)}` : 'Confirmed swaps'}</small>
           </div>
-          <div className="metric">
+          <div className="kpi-card">
             <span className="label">Gross ASE received</span>
-            <strong>{stats ? fmtWei(stats.grossAseWei, 2) : '—'}</strong>
-          </div>
-          <div className="metric">
-            <span className="label">Open inventory mark</span>
-            <strong>{stats ? fmtWei(stats.inventoryAseWei, 2) : '—'}</strong>
-          </div>
-          <div className="metric">
-            <span className="label">Last fill</span>
-            <strong>{stats?.lastFillAt ? fmtAgeFrom(stats.lastFillAt) : '—'}</strong>
+            <strong className="mono">{stats ? fmtWei(stats.grossAseWei, 2) : '—'}</strong>
+            <small>{stats ? `Open mark ${fmtWei(stats.inventoryAseWei, 2)}` : 'Total proceeds'}</small>
           </div>
         </div>
 
+        <div className="seg-tabs" style={{ marginBottom: 18 }} role="tablist" aria-label="Leaderboard view">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={boardTab === 'wallets'}
+            className={boardTab === 'wallets' ? 'seg-tab active' : 'seg-tab'}
+            onClick={() => setBoardTab('wallets')}
+          >
+            Wallet ranking
+            <span className="seg-tab-count">{sortedWallets.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={boardTab === 'bots'}
+            className={boardTab === 'bots' ? 'seg-tab active' : 'seg-tab'}
+            onClick={() => setBoardTab('bots')}
+          >
+            Individual bots
+            <span className="seg-tab-count">{sortedStrategies.length}</span>
+          </button>
+        </div>
+
+        {boardTab === 'wallets' ? (
         <div className="panel">
           <div className="panel-head">
             <div>
@@ -212,7 +229,7 @@ export function Leaderboard() {
               </p>
             </div>
             <span className="muted" style={{ fontSize: 13 }}>
-              Asentum testnet · live
+              {NETWORK.shortLabel} · live
             </span>
           </div>
 
@@ -288,7 +305,7 @@ export function Leaderboard() {
                       <td>
                         <a
                           className="link-arrow"
-                          href={`https://explorer.asentum.com/address/${wallet.wallet}`}
+                          href={explorerAddressUrl(wallet.wallet)}
                           target="_blank"
                           rel="noreferrer"
                         >
@@ -302,13 +319,13 @@ export function Leaderboard() {
             </div>
           )}
         </div>
-
-        <div className="panel" style={{ marginTop: 18 }}>
+        ) : (
+        <div className="panel">
           <div className="panel-head">
             <div>
               <span className="label">Bots behind these wallets</span>
               <p className="muted" style={{ marginTop: 3 }}>
-                Secondary view — the same contracts aggregated above, listed individually
+                Individual verified strategy contracts aggregated in the wallet ranking
               </p>
             </div>
             <div className="swap-slippage-opts">
@@ -381,23 +398,23 @@ export function Leaderboard() {
             </div>
           )}
         </div>
+        )}
 
-        <div className="leaderboard-note">
-          <strong>How this ranking is computed</strong>
-          <span>
+        <details className="soft-details" style={{ marginTop: 20 }}>
+          <summary>How this ranking is computed</summary>
+          <div className="soft-details-body">
             Position is determined only by confirmed data: a wallet&apos;s bots are the verified contracts whose
             owner field is that address, fills come from swap receipts attributed to those contracts, and the
             running count only includes bots whose cron job still exists and whose stop flag is false. Volume is
             the token amount sold, quoted in the token&apos;s own decimals and never merged across assets. Gross ASE
-            received is quote volume from token → ASE fills — proceeds, not profit.            Open inventory is a live AMM
+            received is quote volume from token → ASE fills — proceeds, not profit. Open inventory is a live AMM
             quote of unsold tokens. Points are awarded only for verified on-chain actions: {POINTS.perBot} for a
             bot that reaches the registry, {POINTS.perFill} for every indexed execution, and 1 point for each{' '}
             {POINTS.asePerPoint} ASE received. Points are recomputed from chain data on every load; nothing is
-            stored off-chain. No ROI or
-            PnL is displayed here because a reliable profit figure needs a per-strategy cost basis, which is only
-            computed on the strategy page where it can be explained.
-          </span>
-        </div>
+            stored off-chain. No ROI or PnL is displayed here because a reliable profit figure needs a per-strategy
+            cost basis, which is only computed on the strategy page where it can be explained.
+          </div>
+        </details>
       </section>
     </>
   );

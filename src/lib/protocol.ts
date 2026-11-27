@@ -65,10 +65,46 @@ function asBig(value: string | undefined | null): bigint {
 
 /** Derive the ASE / token pair of one fill event without mixing units. */
 function fillFromEvent(strategy: LiveStrategy): ProtocolFill[] {
+  const isPerp = strategy.venue === 'asepad-perps' || strategy.template.startsWith('perp-');
   const token = (strategy.token ?? '').toLowerCase();
-  if (!token) return [];
+  if (!token && !isPerp) return [];
   const out: ProtocolFill[] = [];
   for (const event of strategy.fillEvents) {
+    if (isPerp) {
+      const rawSide = String(event.args.side ?? '').toUpperCase();
+      const rawSize = String(event.args.sizeWei ?? event.args.sizeDelta ?? '0').replace(/^-/, '');
+      const sizeRaw = asBig(rawSize);
+      const priceWei = asBig(String(event.args.price ?? '0'));
+      const marginWei = asBig(String(event.args.marginWei ?? '0'));
+      const notionalWei = asBig(String(event.args.notionalWei ?? '0'));
+      const aseAmount = marginWei > 0n
+        ? marginWei
+        : notionalWei > 0n
+          ? notionalWei
+          : (sizeRaw * priceWei) / 10n ** 18n;
+      if (sizeRaw <= 0n || aseAmount <= 0n) continue;
+      const isSell = rawSide === 'SHORT' || rawSide.includes('CLOSE-LONG') || rawSide.includes('REDUCE-LONG');
+      const side: FillSide = isSell ? 'sell' : 'buy';
+      out.push({
+        key: `${event.txHash}-${event.block}-${rawSide}-${out.length}`,
+        txHash: event.txHash,
+        block: event.block,
+        timestamp: event.timestamp ?? null,
+        side,
+        tokenAmount: sizeRaw.toString(),
+        tokenDecimals: strategy.tokenDecimals ?? 18,
+        symbol: strategy.symbol,
+        aseAmount: aseAmount.toString(),
+        strategyName: strategy.name,
+        strategyAddress: strategy.address,
+        strategyAse1: strategy.ase1,
+        owner: strategy.owner,
+        template: strategy.template,
+        verified: strategy.verified,
+      });
+      continue;
+    }
+
     const tokenIn = String(event.args.tokenIn ?? '').toLowerCase();
     const tokenOut = String(event.args.tokenOut ?? '').toLowerCase();
     const amountIn = asBig(String(event.args.amountIn ?? '0'));
@@ -156,7 +192,9 @@ export function buildStats(strategies: LiveStrategy[], fills: ProtocolFill[]): P
   };
 }
 
-const SNAPSHOT_KEY = 'strata:protocol:v1';
+import { chainStorageKey } from './network';
+
+const SNAPSHOT_KEY = chainStorageKey('strata:protocol:v1');
 let cached: { at: number; snapshot: ProtocolSnapshot } | null = null;
 let inflight: Promise<ProtocolSnapshot> | null = null;
 let seededFromDisk = false;

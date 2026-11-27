@@ -3,8 +3,10 @@ import { Link } from 'react-router-dom';
 import { useAsync } from '../lib/hooks';
 import { loadMarketplaceListings } from '../lib/marketplace';
 import { loadStrategies } from '../lib/registry';
+import { explorerAddressUrl } from '../lib/rpc';
 import { TEMPLATES } from '../lib/templates';
 import { shortAddr } from '../lib/format';
+import { InfoTip } from '../components/InfoTip';
 
 
 function rawToTokenAmount(raw: string | undefined, decimals: number | null): string | null {
@@ -21,36 +23,56 @@ function rawToTokenAmount(raw: string | undefined, decimals: number | null): str
 function buildTemplateUrl(listing: import('../lib/marketplace').MarketplaceListing): string {
   const config = listing.config;
   const params = new URLSearchParams({ template: listing.template, mode: 'lite' });
+  const isPerp = listing.template.startsWith('perp-') || config?.venue === 'asepad-perps';
+  if (isPerp) params.set('venue', 'perps');
   if (config) {
-    if (config.poolId) params.set('pool', config.poolId);
-    const decimals = listing.liveStrategy.tokenDecimals ?? (config.decimals !== undefined ? Number(config.decimals) : null);
-    const rawSize = config.sellSizeWei ?? config.sizeWei ?? config.sizePerLevelWei ?? config.notionalWei;
-    const size = listing.template === 'dca' ? null : rawToTokenAmount(rawSize, decimals);
-    if (size) params.set('size', size);
-    let budgetRaw = listing.template === 'dca' ? undefined : config.budgetWei ?? config.notionalWei;
-    let budgetSuggested = false;
-    if (!budgetRaw && rawSize && listing.template !== 'dca') {
-      let suggested = BigInt(rawSize);
-      if (listing.template === 'grid') suggested *= BigInt(config.levels ?? '5');
-      budgetRaw = suggested.toString();
-      budgetSuggested = true;
+    if (isPerp) {
+      if (config.marketId) params.set('market', config.marketId);
+      if (config.side) params.set('side', config.side);
+      if (config.leverage) params.set('leverage', config.leverage);
+      const margin = rawToTokenAmount(config.totalMarginWei ?? config.marginWei, 18);
+      if (margin) params.set('margin', margin);
+      const legMargin = rawToTokenAmount(config.marginPerLegWei, 18);
+      if (legMargin) params.set('legMargin', legMargin);
+      if (config.intervalSec) params.set('interval', config.intervalSec);
+      if (config.slices) params.set('slices', config.slices);
+      if (config.levels) params.set('levels', config.levels);
+      if (config.tpBps) params.set('tpPct', String(Number(config.tpBps) / 100));
+      if (config.slBps) params.set('slPct', String(Number(config.slBps) / 100));
+      if (config.stepBps) params.set('stepPct', String(Number(config.stepBps) / 100));
+      if (config.triggerMoveBps) params.set('triggerMovePct', String(Number(config.triggerMoveBps) / 100));
+      if (config.triggerDir) params.set('triggerDir', config.triggerDir);
+    } else {
+      if (config.poolId) params.set('pool', config.poolId);
+      const decimals = listing.liveStrategy.tokenDecimals ?? (config.decimals !== undefined ? Number(config.decimals) : null);
+      const rawSize = config.sellSizeWei ?? config.sizeWei ?? config.sizePerLevelWei ?? config.notionalWei;
+      const size = listing.template === 'dca' ? null : rawToTokenAmount(rawSize, decimals);
+      if (size) params.set('size', size);
+      let budgetRaw = listing.template === 'dca' ? undefined : config.budgetWei ?? config.notionalWei;
+      let budgetSuggested = false;
+      if (!budgetRaw && rawSize && listing.template !== 'dca') {
+        let suggested = BigInt(rawSize);
+        if (listing.template === 'grid') suggested *= BigInt(config.levels ?? '5');
+        budgetRaw = suggested.toString();
+        budgetSuggested = true;
+      }
+      const budget = rawToTokenAmount(budgetRaw, decimals);
+      if (budget) params.set('budget', budget);
+      const buySizeAse = rawToTokenAmount(config.buySizeAseWei, 18);
+      const buyBudgetAse = rawToTokenAmount(config.buyBudgetAseWei, 18);
+      if (buySizeAse) params.set('buySizeAse', buySizeAse);
+      if (buyBudgetAse) params.set('buyBudgetAse', buyBudgetAse);
+      if (budgetSuggested) params.set('budgetHint', 'suggested');
+      const threshold = config.thresholdBps ?? config.stepBps;
+      if (threshold) params.set('threshold', threshold);
+      for (const [key, value] of [
+        ['interval', config.intervalSec], ['slices', config.slices], ['levels', config.levels],
+        ['costBasis', rawToTokenAmount(config.costBasisAseWeiPerToken, 18) ?? undefined],
+        ['dailyLoss', rawToTokenAmount(config.dailyLossLimitAseWei, 18) ?? undefined],
+        ['stopLoss', config.stopLossBps], ['takeProfit', config.takeProfitBps],
+        ['maxDrawdown', config.maxDrawdownBps], ['targetUpside', config.targetUpsideBps],
+      ] as const) if (value) params.set(key, value);
     }
-    const budget = rawToTokenAmount(budgetRaw, decimals);
-    if (budget) params.set('budget', budget);
-    const buySizeAse = rawToTokenAmount(config.buySizeAseWei, 18);
-    const buyBudgetAse = rawToTokenAmount(config.buyBudgetAseWei, 18);
-    if (buySizeAse) params.set('buySizeAse', buySizeAse);
-    if (buyBudgetAse) params.set('buyBudgetAse', buyBudgetAse);
-    if (budgetSuggested) params.set('budgetHint', 'suggested');
-    const threshold = config.thresholdBps ?? config.stepBps;
-    if (threshold) params.set('threshold', threshold);
-    for (const [key, value] of [
-      ['interval', config.intervalSec], ['slices', config.slices], ['levels', config.levels],
-      ['costBasis', rawToTokenAmount(config.costBasisAseWeiPerToken, 18) ?? undefined],
-      ['dailyLoss', rawToTokenAmount(config.dailyLossLimitAseWei, 18) ?? undefined],
-      ['stopLoss', config.stopLossBps], ['takeProfit', config.takeProfitBps],
-      ['maxDrawdown', config.maxDrawdownBps], ['targetUpside', config.targetUpsideBps],
-    ] as const) if (value) params.set(key, value);
   }
   params.set('fromMarketplace', '1');
   return `/deploy?${params.toString()}`;
@@ -76,42 +98,31 @@ export function Marketplace() {
       <section className="wrap detail-head">
         <span className="label">Community · verified on-chain strategies</span>
         <h1 className="detail-title">Shared strategies.</h1>
-        <p className="section-note" style={{ maxWidth: 700, marginTop: 18 }}>
-          Browse strategies shared by their creators. Review what each strategy is designed to do, see its on-chain activity and use its template as a starting point. Use shared settings as a starting point, then review every value before signing. A listing is not an endorsement or a performance guarantee.
+        <p className="section-note" style={{ marginTop: 10 }}>
+          Clone verified on-chain setups shared by creators—review all values before signing.
+          <InfoTip
+            label="Verification & disclaimers"
+            text="Strata checks that the public contract matches its original template source and creator ownership. Listings are starting points, not endorsements or performance guarantees."
+          />
         </p>
-        <div className="mode-switch" role="tablist" style={{ marginTop: 22 }}>
-          <Link to="/strategies" className="mode-option">
-            <span>Strategy catalog</span>
-            <small>Mechanics & bot types</small>
+        <div className="seg-tabs" role="tablist" aria-label="Strategy views">
+          <Link to="/strategies" className="seg-tab">
+            Strategy catalog
           </Link>
-          <Link to="/strategies?tab=live" className="mode-option">
-            <span>Live contracts</span>
-            <small>Executing on-chain</small>
+          <Link to="/strategies?tab=live" className="seg-tab">
+            Live contracts
           </Link>
-          <Link to="/marketplace" className="mode-option active">
-            <span>Marketplace</span>
-            <small>Shared setups</small>
+          <Link to="/marketplace" className="seg-tab active">
+            Marketplace
           </Link>
         </div>
       </section>
 
       <section className="wrap marketplace-page" style={{ paddingBottom: 90 }}>
-        <div className="marketplace-intro panel">
-          <div>
-            <span className="label">How publishing works</span>
-            <h2>Shared by creators. Checked against the chain.</h2>
-            <p className="muted">A creator shares a strategy they own. Strata checks that the public contract still matches its original source and that the creator is its owner.</p>
-          </div>
-          <div className="marketplace-intro-actions">
-            <Link className="btn btn-primary" to="/strategies">Explore deployed strategies</Link>
-            <Link className="btn btn-ghost" to="/deploy">Create your own</Link>
-          </div>
-        </div>
-
         {!marketplace.data?.configured && !marketplace.loading && (
-          <div className="notice marketplace-notice" style={{ marginTop: 18 }}>
+          <div className="notice marketplace-notice" style={{ marginTop: 6 }}>
             <strong>Community publishing is not enabled yet</strong>
-            <span>The site operator still needs to connect the shared publishing registry. Until then, this page can discover verified public strategies, but it will not label them as community-published.</span>
+            <span>The shared publishing registry is not connected yet; verified public contracts discovered on chain still appear below.</span>
           </div>
         )}
 
@@ -138,7 +149,7 @@ export function Marketplace() {
               <div className="market-card-top"><span className="pill pill-live">Source verified</span><span className="label">{listing.config ? 'Settings included' : 'Template only'}</span></div>
               <h3>{listing.title}</h3>
               <p className="muted">{listing.description || 'No description supplied.'}</p>
-              <div className="market-card-meta"><span>Owner</span><a className="mono" href={`https://explorer.asentum.com/address/${listing.liveStrategy.ase1}`} target="_blank" rel="noreferrer">{shortAddr(listing.owner, 8, 5)}</a></div>
+              <div className="market-card-meta"><span>Owner</span><a className="mono" href={explorerAddressUrl(listing.liveStrategy.ase1)} target="_blank" rel="noreferrer">{shortAddr(listing.owner, 8, 5)}</a></div>
               <div className="market-card-meta"><span>Contract</span><span className="mono">{shortAddr(listing.strategy, 8, 5)}</span></div>
               <div className="market-card-actions"><Link className="btn btn-ghost" to={`/strategies/${listing.strategy}`}>Inspect</Link><Link className="btn btn-primary" to={buildTemplateUrl(listing)}>{listing.config ? 'Use shared settings' : 'Use this template'}</Link></div>
             </article>

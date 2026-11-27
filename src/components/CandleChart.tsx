@@ -1,5 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { chainStorageKey } from '../lib/network';
 import type { Candle } from '../lib/marketData';
+import type { ChartPriceOverlay, ChartSimMarker } from '../lib/strategySim';
 import { fmtNum } from '../lib/format';
 
 /**
@@ -61,6 +63,9 @@ export function CandleChart({
   symbol,
   loading = false,
   error = null,
+  overlays = [],
+  markers = [],
+  compact = false,
 }: {
   candles: Candle[];
   intervalSec: number;
@@ -68,6 +73,9 @@ export function CandleChart({
   symbol: string;
   loading?: boolean;
   error?: string | null;
+  overlays?: ChartPriceOverlay[];
+  markers?: ChartSimMarker[];
+  compact?: boolean;
 }) {
   const { ref, width } = useWidth(760);
   const [visible, setVisible] = useState(90);
@@ -82,7 +90,7 @@ export function CandleChart({
   const drag = useRef<{ startX: number; startPan: number } | null>(null);
 
   const last = candles.length > 0 ? candles[candles.length - 1] : null;
-  const marksKey = `strata.chart.marks.${symbol}`;
+  const marksKey = chainStorageKey(`strata.chart.marks.${symbol}`);
   useEffect(() => {
     try { const raw = window.localStorage.getItem(marksKey); setPriceMarks(raw ? JSON.parse(raw) as number[] : []); } catch { setPriceMarks([]); }
   }, [marksKey]);
@@ -96,22 +104,32 @@ export function CandleChart({
     [candles, start, end, intervalSec],
   );
 
-  const padLeft = 56;
-  const padRight = 14;
-  const padTop = 14;
-  const priceHeight = Math.round((height - 54) * 0.76);
-  const volTop = padTop + priceHeight + 10;
-  const volHeight = Math.max(24, height - volTop - 24);
-  const innerW = Math.max(20, width - padLeft - padRight);
-
   const highs = shown.map((candle) => candle.high);
   const lows = shown.map((candle) => candle.low);
-  const rawHigh = highs.length ? Math.max(...highs) : last?.close ?? 1;
-  const rawLow = lows.length ? Math.min(...lows) : last?.close ?? 0;
+  const baseHigh = highs.length ? Math.max(...highs) : last?.close ?? 1;
+  const baseLow = lows.length ? Math.min(...lows) : last?.close ?? 0;
+  const reasonableOverlays = overlays
+    .map((o) => o.price)
+    .filter((p) => Number.isFinite(p) && p > 0 && (highs.length === 0 || (p >= baseLow * 0.45 && p <= baseHigh * 1.8)));
+  const rawHigh = Math.max(baseHigh, ...(reasonableOverlays.length ? reasonableOverlays : [baseHigh]));
+  const rawLow = Math.min(baseLow, ...(reasonableOverlays.length ? reasonableOverlays : [baseLow]));
   const priceSpan = rawHigh - rawLow || Math.abs(rawHigh) * 0.01 || 1;
   const high = rawHigh + priceSpan * 0.06;
   const low = Math.max(0, rawLow - priceSpan * 0.06);
   const scale = high - low || 1;
+
+  const ticks = Array.from({ length: 4 }, (_, i) => low + (scale * i) / 3);
+  const timeTicks = Array.from({ length: 4 }, (_, i) => start + (spanSeconds * i) / 3);
+  const maxTickChars = Math.max(6, ...ticks.map((t) => priceFmt(t).length));
+  const padLeft = Math.max(72, Math.ceil(maxTickChars * 8 + 16));
+  const padRight = 18;
+  const padTop = 18;
+  const priceHeight = Math.round((height - 58) * 0.76);
+  const volTop = padTop + priceHeight + 12;
+  const volHeight = Math.max(24, height - volTop - 26);
+  const innerW = Math.max(20, width - padLeft - padRight);
+  const lastPriceLabel = last ? priceFmt(last.close) : '';
+  const lastBadgeWidth = Math.max(64, Math.ceil(lastPriceLabel.length * 7.8 + 16));
 
   const xFor = (time: number) => padLeft + ((time - start) / (end - start)) * innerW;
   const yFor = (price: number) => padTop + priceHeight - ((price - low) / scale) * priceHeight;
@@ -128,9 +146,6 @@ export function CandleChart({
     const alpha = 2 / (period + 1); let value = shown[0]?.close ?? 0;
     return shown.map((candle, index) => { value = index === 0 ? candle.close : candle.close * alpha + value * (1 - alpha); return `${index === 0 ? 'M' : 'L'} ${xFor(candle.time + intervalSec / 2)} ${yFor(value)}`; }).join(' ');
   };
-
-  const ticks = Array.from({ length: 4 }, (_, i) => low + (scale * i) / 3);
-  const timeTicks = Array.from({ length: 4 }, (_, i) => start + (spanSeconds * i) / 3);
 
   // Wheel zoom needs a non-passive listener, so it is attached directly.
   useEffect(() => {
@@ -194,15 +209,40 @@ export function CandleChart({
           </strong>
         </div>
         <div className="candle-chart-tools">
-          <span className="mono muted">{shown.length} candles</span>
-          <button type="button" className={style === 'line' ? 'chip active' : 'chip'} onClick={() => setStyle('line')}>Line</button>
-          <button type="button" className={style === 'candles' ? 'chip active' : 'chip'} onClick={() => setStyle('candles')}>Candles</button>
-          <button type="button" className={ema20 ? 'chip active' : 'chip'} onClick={() => setEma20((v) => !v)}>EMA 20</button>
-          <button type="button" className={ema50 ? 'chip active' : 'chip'} onClick={() => setEma50((v) => !v)}>EMA 50</button>
-          <button type="button" className={markMode ? 'chip active' : 'chip'} onClick={() => setMarkMode((v) => !v)}>＋ Price level</button>
-          {priceMarks.length > 0 && <button type="button" className="chip" onClick={() => setPriceMarks([])}>Clear levels</button>}
+          <div className="seg-tabs" style={{ marginTop: 0 }} role="group" aria-label="Chart mode">
+            <button type="button" className={style === 'line' ? 'seg-tab active' : 'seg-tab'} onClick={() => setStyle('line')}>Line</button>
+            <button type="button" className={style === 'candles' ? 'seg-tab active' : 'seg-tab'} onClick={() => setStyle('candles')}>Candles</button>
+          </div>
+          {!compact && <button type="button" className={ema20 ? 'chip active' : 'chip'} onClick={() => setEma20((v) => !v)}>EMA 20</button>}
+          {!compact && <button type="button" className={ema50 ? 'chip active' : 'chip'} onClick={() => setEma50((v) => !v)}>EMA 50</button>}
+          {!compact && <button type="button" className={markMode ? 'chip active' : 'chip'} onClick={() => setMarkMode((v) => !v)}>+ Level</button>}
+          {!compact && priceMarks.length > 0 && <button type="button" className="chip" onClick={() => setPriceMarks([])}>Clear</button>}
           {pan > 0 && <button type="button" className="chip" onClick={() => setPan(0)}>Latest</button>}
         </div>
+      </div>
+
+      <div className="candle-readout mono" aria-live="polite">
+        {hovered ? (
+          <>
+            <span className="muted">{fullTime(hovered.time)}</span>
+            <span>O <b>{priceFmt(hovered.open)}</b></span>
+            <span>H <b>{priceFmt(hovered.high)}</b></span>
+            <span>L <b>{priceFmt(hovered.low)}</b></span>
+            <span>C <b>{priceFmt(hovered.close)}</b></span>
+            <span className="muted">Vol {fmtNum(Number(hovered.volume.toFixed(2)))}</span>
+          </>
+        ) : last ? (
+          <>
+            <span className="muted">Latest · {fullTime(last.time)}</span>
+            <span>O <b>{priceFmt(last.open)}</b></span>
+            <span>H <b>{priceFmt(last.high)}</b></span>
+            <span>L <b>{priceFmt(last.low)}</b></span>
+            <span>C <b>{priceFmt(last.close)}</b></span>
+            <span className="muted">{shown.length} bars</span>
+          </>
+        ) : (
+          <span className="muted">Hover chart to inspect OHLCV</span>
+        )}
       </div>
 
       <svg
@@ -236,7 +276,7 @@ export function CandleChart({
         {ticks.map((tick) => (
           <g key={tick}>
             <line x1={padLeft} x2={padLeft + innerW} y1={yFor(tick)} y2={yFor(tick)} stroke="var(--line-soft)" />
-            <text x={padLeft - 8} y={yFor(tick) + 3.5} textAnchor="end" fill="var(--dim)" fontSize="12" fontFamily="var(--font-mono)">
+            <text x={padLeft - 10} y={yFor(tick) + 4} textAnchor="end" fill="var(--muted)" fontSize="12.5" fontFamily="var(--font-mono)">
               {priceFmt(tick)}
             </text>
           </g>
@@ -251,6 +291,25 @@ export function CandleChart({
         {ema20 && shown.length > 1 && <path d={emaPath(20)} fill="none" stroke="var(--accent)" strokeWidth="1.2" opacity="0.5" />}
         {ema50 && shown.length > 1 && <path d={emaPath(50)} fill="none" stroke="var(--accent-2)" strokeWidth="1.2" opacity="0.6" />}
         {priceMarks.map((price, index) => price >= low && price <= high ? <g key={`${price}-${index}`}><line x1={padLeft} x2={padLeft + innerW} y1={yFor(price)} y2={yFor(price)} stroke="var(--warn)" strokeDasharray="5 4"/><text x={padLeft + innerW - 4} y={yFor(price) - 4} textAnchor="end" fill="var(--warn)" fontSize="11">{priceFmt(price)}</text></g> : null)}
+        {overlays.map((overlay, index) => {
+          if (!Number.isFinite(overlay.price) || overlay.price < low || overlay.price > high) return null;
+          const color = overlay.tone === 'up'
+            ? 'var(--up)'
+            : overlay.tone === 'down'
+              ? 'var(--down)'
+              : overlay.tone === 'warn'
+                ? 'var(--warn)'
+                : 'var(--accent)';
+          const y = yFor(overlay.price);
+          return (
+            <g key={`ov-${overlay.label}-${index}`}>
+              <line x1={padLeft} x2={padLeft + innerW} y1={y} y2={y} stroke={color} strokeWidth="1.15" strokeDasharray="4 3" opacity="0.85" />
+              <text x={padLeft + 4} y={Math.max(padTop + 10, y - 3)} fill={color} fontSize="10.5" fontFamily="var(--font-mono)">
+                {overlay.label} · {priceFmt(overlay.price)}
+              </text>
+            </g>
+          );
+        })}
         {shown.map((candle) => {
           const x = xFor(candle.time + intervalSec / 2);
           const up = candle.close >= candle.open;
@@ -287,17 +346,17 @@ export function CandleChart({
         })}
 
         <line x1={padLeft} x2={padLeft + innerW} y1={volTop + volHeight} y2={volTop + volHeight} stroke="var(--line)" />
-        <text x={padLeft} y={volTop - 4} fill="var(--dim)" fontSize="12" fontFamily="var(--font-mono)">
-          volume · ASE
+        <text x={padLeft} y={volTop - 4} fill="var(--muted)" fontSize="11.5" fontFamily="var(--font-mono)">
+          VOL · ASE
         </text>
 
-        {timeTicks.map((tick) => (
+        {timeTicks.map((tick, idx) => (
           <text
             key={tick}
             x={xFor(tick)}
             y={height - 6}
-            textAnchor="middle"
-            fill="var(--dim)"
+            textAnchor={idx === 0 ? 'start' : idx === timeTicks.length - 1 ? 'end' : 'middle'}
+            fill="var(--muted)"
             fontSize="12"
             fontFamily="var(--font-mono)"
           >
@@ -315,9 +374,9 @@ export function CandleChart({
               stroke="var(--accent-line)"
               strokeDasharray="3 3"
             />
-            <rect x={padLeft + innerW - 58} y={yFor(last.close) - 8} width="58" height="16" fill="var(--accent-soft)" stroke="var(--accent-line)" />
-            <text x={padLeft + innerW - 29} y={yFor(last.close) + 3.5} textAnchor="middle" fill="var(--text)" fontSize="12" fontFamily="var(--font-mono)">
-              {priceFmt(last.close)}
+            <rect x={padLeft + innerW - lastBadgeWidth} y={yFor(last.close) - 10} width={lastBadgeWidth} height="20" rx="4" fill="var(--surface-3)" stroke="var(--accent-line)" />
+            <text x={padLeft + innerW - lastBadgeWidth / 2} y={yFor(last.close) + 4} textAnchor="middle" fill="var(--text)" fontSize="12" fontFamily="var(--font-mono)">
+              {lastPriceLabel}
             </text>
           </g>
         )}
@@ -329,19 +388,20 @@ export function CandleChart({
             <circle cx={hover.x} cy={hover.y} r="2.8" fill="var(--accent)" />
           </g>
         )}
-      </svg>
 
-      {hovered && (
-        <div className="candle-readout mono">
-          <span className="muted">{fullTime(hovered.time)}</span>
-          <span>O {priceFmt(hovered.open)}</span>
-          <span>H {priceFmt(hovered.high)}</span>
-          <span>L {priceFmt(hovered.low)}</span>
-          <span>C {priceFmt(hovered.close)}</span>
-          <span className="muted">V {fmtNum(Number(hovered.volume.toFixed(2)))}</span>
-          <span className="muted">{hovered.trades} fills</span>
-        </div>
-      )}
+        {markers.map((marker, index) => {
+          if (marker.time + intervalSec < start || marker.time > end) return null;
+          if (!Number.isFinite(marker.price) || marker.price < low || marker.price > high) return null;
+          const x = xFor(marker.time + intervalSec / 2);
+          const y = yFor(marker.price);
+          const color = marker.side === 'buy' ? 'var(--up)' : 'var(--down)';
+          return (
+            <g key={`mk-${marker.time}-${index}`}>
+              <circle cx={x} cy={y} r="3.6" fill={color} stroke="var(--bg)" strokeWidth="1.2" />
+            </g>
+          );
+        })}
+      </svg>
 
       {error && <p className="candle-empty down">{error}</p>}
       {!error && shown.length === 0 && !loading && (

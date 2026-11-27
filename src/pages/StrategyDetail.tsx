@@ -8,8 +8,10 @@ import { fmtDuration, fmtWei, shortHash, weiToAse } from '../lib/format';
 import { CodeBlock } from '../components/CodeBlock';
 import { MARKETPLACE_ADDRESS } from '../lib/marketplace';
 import { StrategyPnlPanel } from '../components/StrategyPnlPanel';
-import { botTypeFor } from '../lib/templates';
+import { buildCloneStrategyUrl, buildCronDecisionFeed, inspectContractSafety } from '../lib/strategyAudit';
+import { botTypeFor, isPerpTemplate } from '../lib/templates';
 import { closeBot } from '../lib/botLifecycle';
+import { PERPS_APP_URL, perpsPriceToNumber } from '../lib/perps';
 import { getUserStrategies, removeUserStrategy, saveUserStrategy, saveUserTx } from '../lib/userStrategies';
 
 function nextRunLabel(cron: { nextRunAt: string } | null): string {
@@ -37,13 +39,33 @@ interface FillRow {
 }
 
 function buildFills(strategy: LiveStrategy): FillRow[] {
+  const isPerp = isPerpTemplate(strategy.template) || strategy.venue === 'asepad-perps';
   const tokenAddress = (strategy.token ?? '').toLowerCase();
-  if (!tokenAddress) return [];
+  if (!tokenAddress && !isPerp) return [];
   return strategy.fillEvents
     .slice()
     .sort((a, b) => b.block - a.block)
     .slice(0, 20)
     .map((event) => {
+      if (isPerp) {
+        const rawSide = String(event.args.side ?? 'LONG');
+        const sizeRaw = BigInt(String(event.args.sizeWei ?? event.args.sizeDelta ?? '0').replace(/^-/, '') || '0');
+        const priceWei = BigInt(String(event.args.price ?? '0') || '0');
+        const marginWei = BigInt(String(event.args.marginWei ?? '0') || '0');
+        const notionalWei = BigInt(String(event.args.notionalWei ?? '0') || '0');
+        const aseVal = marginWei > 0n ? marginWei : notionalWei > 0n ? notionalWei : (sizeRaw * priceWei) / 10n ** 18n;
+        const isSell = rawSide.toUpperCase() === 'SHORT' || rawSide.toLowerCase().includes('close-long') || rawSide.toLowerCase().includes('reduce-long');
+        return {
+          key: `${event.txHash}-${event.block}-${rawSide}`,
+          block: event.block,
+          side: isSell ? 'Sold' : 'Bought',
+          amount: strategy.tokenDecimals !== null
+            ? `${rawSide} · ${formatToken(sizeRaw, strategy.tokenDecimals, strategy.symbol ?? '')}`
+            : `${rawSide} · ${sizeRaw.toString()}`,
+          ase: fmtWei(aseVal, 4),
+          txHash: event.txHash,
+        } satisfies FillRow;
+      }
       const amountIn = BigInt(String(event.args.amountIn ?? '0'));
       const amountOut = BigInt(String(event.args.amountOut ?? '0'));
       const sold = String(event.args.tokenIn ?? '').toLowerCase() === tokenAddress;
@@ -74,6 +96,7 @@ export function StrategyDetail() {
   const [marketDescription, setMarketDescription] = useState('');
   const [marketTags, setMarketTags] = useState('');
   const [marketStatus, setMarketStatus] = useState('');
+  const [detailTab, setDetailTab] = useState<'overview' | 'decisions' | 'technical'>('overview');
   const { data: strategy, loading, error, refresh } = useAsync(
     () => loadStrategy(address.toLowerCase()),
     12000,
@@ -136,6 +159,7 @@ export function StrategyDetail() {
     setActionMessage('');
     setActionError('');
     try {
+      const isPerp = Boolean(strategy && (isPerpTemplate(strategy.template) || strategy.venue === 'asepad-perps'));
       const result = await closeBot({
         client,
         contract: strategy?.ase1 || strategy?.address || address,
@@ -144,8 +168,10 @@ export function StrategyDetail() {
         token: strategy?.token ?? null,
         // Older signal contracts shipped without withdrawTokens. New source
         // has the method, so decide from the deployed source, not the template.
-        supportsTokenWithdraw: strategy?.template !== 'momentum-signal'
-          || Boolean(strategy?.source?.includes('withdrawTokens')),
+        supportsTokenWithdraw: !isPerp && (strategy?.template !== 'momentum-signal'
+          || Boolean(strategy?.source?.includes('withdrawTokens'))),
+        supportsPerpClose: isPerp,
+        perpMarketId: strategy?.marketId ?? null,
         needsStop: mode === 'close',
         onProgress: setActionMessage,
         onStopped: () => {
@@ -159,9 +185,15 @@ export function StrategyDetail() {
           if (!wallet.address) return;
           saveUserTx(wallet.address, {
             hash,
-            type: method === 'stop' ? 'cancel' : 'withdraw',
+            type: method === 'stop' ? 'cancel' : method === 'closePosition' ? 'perps' : 'withdraw',
             description: `${
-              method === 'stop' ? 'Stop' : method === 'withdraw' ? 'Withdraw ASE from' : 'Reclaim tokens from'
+              method === 'stop'
+                ? 'Stop'
+                : method === 'closePosition'
+                  ? 'Close perp position & reclaim vault margin from'
+                  : method === 'withdraw'
+                    ? 'Withdraw ASE from'
+                    : 'Reclaim tokens from'
             } ${strategy?.name ?? 'bot'}`,
             timestamp: Date.now(),
             status: 'confirmed',
@@ -231,6 +263,7 @@ export function StrategyDetail() {
   }
 
   const bot = botTypeFor(strategy.template);
+  const isPerp = isPerpTemplate(strategy.template) || strategy.venue === 'asepad-perps';
   // A confirmed stop is stored locally as well: if the status read lags or
   // the node rate-limits it, the page must not keep showing the bot as active.
   const knownStopped = strategy.stopped === true || localMatch?.status === 'stopped';
@@ -247,11 +280,19 @@ export function StrategyDetail() {
   const statusClass = knownStopped ? 'status-badge off' : running ? 'status-badge live' : 'status-badge pending';
   const fills = buildFills(strategy);
   const needsStop = !knownStopped;
-  const canReclaimTokens = strategy.template !== 'momentum-signal' || strategy.source.includes('withdrawTokens');
+  const canReclaimTokens = !isPerp && (strategy.template !== 'momentum-signal' || strategy.source.includes('withdrawTokens'));
+  const hasPerpVaultState = Boolean(
+    isPerp && strategy.perpPosition
+    && (BigInt(strategy.perpPosition.collateralWei || '0') > 0n || BigInt(strategy.perpPosition.sizeWei || '0') !== 0n),
+  );
   const hasBalance = BigInt(strategy.balanceAse || '0') > 0n
+    || hasPerpVaultState
     || (strategy.token !== null
       && canReclaimTokens
       && BigInt(strategy.tokenBalance || '0') > 0n);
+  const deployCopyUrl = buildCloneStrategyUrl(strategy);
+  const safetyChecks = inspectContractSafety(strategy);
+  const decisionFeed = buildCronDecisionFeed(strategy);
 
   return (
     <>
@@ -284,7 +325,7 @@ export function StrategyDetail() {
         {walletIsOwner ? (
           notArmed ? (
             <div className="manage-bar">
-              <Link className="btn btn-primary" to={`/deploy?template=${strategy.template}`}>
+              <Link className="btn btn-primary" to={deployCopyUrl}>
                 Start a new bot
               </Link>
               {localMatch && (
@@ -303,6 +344,9 @@ export function StrategyDetail() {
               >
                 {actionBusy ? 'Closing…' : needsStop ? 'Close bot & return funds' : hasBalance ? 'Withdraw everything' : 'Nothing to withdraw'}
               </button>
+              <Link className="btn btn-ghost" to={deployCopyUrl}>
+                Clone settings
+              </Link>
               {knownStopped && !hasBalance && localMatch && wallet.address && (
                 <button
                   className="btn btn-ghost"
@@ -319,7 +363,7 @@ export function StrategyDetail() {
           )
         ) : (
           <div className="manage-bar">
-            <Link className="btn btn-primary" to={`/deploy?template=${strategy.template}`}>Deploy a bot like this</Link>
+            <Link className="btn btn-primary" to={deployCopyUrl}>Deploy a bot like this</Link>
           </div>
         )}
 
@@ -347,58 +391,146 @@ export function StrategyDetail() {
       </section>
 
       <section className="wrap">
-        <div className="metrics">
-          <div className="metric">
-            <div className="metric-label">Trades</div>
-            <div className="metric-value">{strategy.trades}</div>
+        <div className="kpi-strip">
+          <div className="kpi-card">
+            <span className="label">Trades</span>
+            <strong className="mono">{strategy.trades}</strong>
+            <small>Executed fills</small>
           </div>
-          <div className="metric">
-            <div className="metric-label">ASE in contract</div>
-            <div className="metric-value">{fmtWei(strategy.balanceAse, 3)}</div>
+          <div className="kpi-card">
+            <span className="label">ASE in contract</span>
+            <strong className="mono">{fmtWei(strategy.balanceAse, 3)}</strong>
+            <small>Available contract balance</small>
           </div>
-          {strategy.token && strategy.tokenDecimals !== null && (
-            <div className="metric">
-              <div className="metric-label">Tokens in contract</div>
-              <div className="metric-value">
+          {!isPerp && strategy.token && strategy.tokenDecimals !== null && (
+            <div className="kpi-card">
+              <span className="label">Tokens in contract</span>
+              <strong className="mono">
                 {formatToken(BigInt(strategy.tokenBalance || '0'), strategy.tokenDecimals, strategy.symbol ?? '')}
-              </div>
+              </strong>
+              <small>Held inventory</small>
             </div>
           )}
-          <div className="metric">
-            <div className="metric-label">Gross received</div>
-            <div className="metric-value">{fmtWei(strategy.realisedWei, 3)}</div>
+          <div className="kpi-card">
+            <span className="label">Gross received</span>
+            <strong className="mono" style={{ color: 'var(--up)' }}>{fmtWei(strategy.realisedWei, 3)}</strong>
+            <small>Total ASE proceeds</small>
           </div>
-          <div className="metric">
-            <div className="metric-label">Runs every</div>
-            <div className="metric-value">
-              {strategy.intervalSec ? fmtDuration(strategy.intervalSec) : '-'}
-            </div>
-          </div>
-          <div className="metric">
-            <div className="metric-label">Schedule status</div>
-            <div className="metric-value" style={{ fontSize: 16 }}>
+          <div className="kpi-card">
+            <span className="label">Schedule</span>
+            <strong className="mono" style={{ fontSize: 18 }}>
               {notArmed
                 ? 'Not scheduled'
                 : strategy.cron?.runsLeft
                   ? `${strategy.cron.runsLeft} runs left`
                   : knownStopped
                     ? 'Stopped'
-                    : 'Schedule ended'}
-            </div>
+                    : 'Ended'}
+            </strong>
+            <small>Runs every {strategy.intervalSec ? fmtDuration(strategy.intervalSec) : '—'}</small>
           </div>
+        </div>
+
+        <div className="seg-tabs" style={{ marginBottom: 24 }} role="tablist" aria-label="Strategy detail sections">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={detailTab === 'overview'}
+            className={detailTab === 'overview' ? 'seg-tab active' : 'seg-tab'}
+            onClick={() => setDetailTab('overview')}
+          >
+            Overview &amp; Trades
+            <span className="seg-tab-count">{fills.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={detailTab === 'decisions'}
+            className={detailTab === 'decisions' ? 'seg-tab active' : 'seg-tab'}
+            onClick={() => setDetailTab('decisions')}
+          >
+            Decisions &amp; Audit
+            <span className="seg-tab-count">{decisionFeed.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={detailTab === 'technical'}
+            className={detailTab === 'technical' ? 'seg-tab active' : 'seg-tab'}
+            onClick={() => setDetailTab('technical')}
+          >
+            Contract &amp; Code
+          </button>
         </div>
       </section>
 
+      {detailTab === 'overview' && (
+      <>
       <section className="wrap" style={{ paddingBottom: 24 }}>
-        {strategy.token && strategy.tokenDecimals !== null && <StrategyPnlPanel strategy={strategy} />}
+        {isPerp ? (
+          <div className="panel pnl-panel">
+            <div className="panel-head">
+              <div>
+                <span className="label">AsePad Perps Vault &amp; Position</span>
+                <p className="muted" style={{ marginTop: 3 }}>
+                  Isolated position held by this bot contract on{' '}
+                  <a href={PERPS_APP_URL} target="_blank" rel="noreferrer" className="link-arrow">perps.asepad.fun ↗</a>
+                </p>
+              </div>
+              <span className="perp-badge-live">
+                Market #{strategy.marketId ?? '—'}{strategy.perpSide ? ` · ${strategy.perpSide}` : ''}{strategy.perpLeverage ? ` ${strategy.perpLeverage}x` : ''}
+              </span>
+            </div>
+            <div className="panel-body">
+              {!strategy.perpPosition ? (
+                <p className="muted">Perp vault state is loading or unavailable.</p>
+              ) : (
+                <div className="pnl-metrics">
+                  <div>
+                    <span className="label">Open Size</span>
+                    <strong className={BigInt(strategy.perpPosition.sizeWei) > 0n ? 'up' : BigInt(strategy.perpPosition.sizeWei) < 0n ? 'down' : ''}>
+                      {strategy.perpPosition.sizeWei === '0'
+                        ? 'Flat (0)'
+                        : `${BigInt(strategy.perpPosition.sizeWei) > 0n ? 'LONG' : 'SHORT'} ${weiToAse(strategy.perpPosition.sizeWei.replace(/^-/, ''), 4)} ${strategy.symbol ?? ''}`}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="label">Vault Collateral</span>
+                    <strong>{fmtWei(strategy.perpPosition.collateralWei, 4)}</strong>
+                  </div>
+                  <div>
+                    <span className="label">Free Margin</span>
+                    <strong>{fmtWei(strategy.perpPosition.freeCollateralWei, 4)}</strong>
+                  </div>
+                  <div>
+                    <span className="label">Entry / Mark</span>
+                    <strong className="mono">
+                      {strategy.perpPosition.entryPriceWei !== '0'
+                        ? `${perpsPriceToNumber(strategy.perpPosition.entryPriceWei, strategy.tokenDecimals ?? 18, 18).toPrecision(5)} / ${perpsPriceToNumber(strategy.perpPosition.markPriceWei, strategy.tokenDecimals ?? 18, 18).toPrecision(5)}`
+                        : `Mark ${perpsPriceToNumber(strategy.perpPosition.markPriceWei, strategy.tokenDecimals ?? 18, 18).toPrecision(5)}`}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="label">Unrealised PnL</span>
+                    <strong className={BigInt(strategy.perpPosition.unrealisedPnlWei) >= 0n ? 'up' : 'down'}>
+                      {fmtWei(strategy.perpPosition.unrealisedPnlWei, 4)}
+                    </strong>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          strategy.token && strategy.tokenDecimals !== null && <StrategyPnlPanel strategy={strategy} />
+        )}
       </section>
 
-      <section className="wrap" style={{ paddingBottom: 34 }}>
+      <section className="wrap" style={{ paddingBottom: 80 }}>
         <div className="panel">
           <div className="panel-head">
             <div>
               <span className="label">Trade history</span>
-              <p className="muted" style={{ marginTop: 3, fontSize: 13 }}>Latest on-chain fills for this bot.</p>
+              <p className="muted" style={{ marginTop: 3 }}>Latest on-chain fills for this bot.</p>
             </div>
             <span className="pill pill-live">{fills.length} shown</span>
           </div>
@@ -436,11 +568,77 @@ export function StrategyDetail() {
           )}
         </div>
       </section>
+      </>
+      )}
 
+      {detailTab === 'decisions' && (
+      <section className="wrap" style={{ paddingBottom: 80 }}>
+        <div className="panels">
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <span className="label">Cron decision feed</span>
+                <p className="muted" style={{ marginTop: 3 }}>
+                  Why this contract executed, waited or halted across recent on-chain ticks.
+                </p>
+              </div>
+              <span className="pill pill-live">{decisionFeed.length} events</span>
+            </div>
+            {decisionFeed.length === 0 ? (
+              <div className="panel-body muted">No Cron signals or lifecycle events indexed yet.</div>
+            ) : (
+              <div className="decision-feed">
+                {decisionFeed.map((item) => (
+                  <div className="decision-row" key={item.key}>
+                    <div className="decision-row-head">
+                      <span className={`decision-dot tone-${item.tone}`} aria-hidden="true" />
+                      <strong>{item.title}</strong>
+                      <span className="dim mono">#{item.block.toLocaleString('en-US')}</span>
+                    </div>
+                    <div className="decision-row-meta">
+                      <span className="muted">{item.detail}</span>
+                      <a href={explorerTxUrl(item.txHash)} target="_blank" rel="noreferrer" className="link-arrow mono">
+                        {shortHash(item.txHash)} ↗
+                      </a>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="panel">
+            <div className="panel-head">
+              <span className="label">Glass Box safety audit</span>
+              <span className={strategy.verified ? 'pill pill-live' : 'pill pill-ended'}>
+                {strategy.verified ? 'Checks passed' : 'Verify source'}
+              </span>
+            </div>
+            <div className="panel-body">
+              <div className="audit-list">
+                {safetyChecks.map((item) => (
+                  <div className="audit-item" key={item.label}>
+                    <div className="audit-item-head">
+                      <span className={`audit-badge status-${item.status}`}>
+                        {item.status === 'ok' ? 'PASS' : item.status === 'warn' ? 'NOTE' : 'FAIL'}
+                      </span>
+                      <strong>{item.label}</strong>
+                    </div>
+                    <p className="muted">{item.detail}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      )}
+
+      {detailTab === 'technical' && (
       <section className="wrap" style={{ paddingBottom: 80 }}>
         <div className="panels">
           <div style={{ display: 'grid', gap: 16 }}>
-            <details className="dev-accordion">
+            <details className="dev-accordion" open>
               <summary>Technical data · contract source, events and schedule</summary>
               <div className="panel-body">
                 <dl className="kv">
@@ -455,7 +653,7 @@ export function StrategyDetail() {
                   <dt>Source hash</dt><dd className="break-value">{strategy.codeHash || '-'}</dd>
                   <dt>Read-back hash</dt><dd className="break-value">{strategy.localHash}</dd>
                 </dl>
-                <p className="muted" style={{ marginTop: 14, fontSize: 12.5 }}>
+                <p className="muted" style={{ marginTop: 14, fontSize: 13 }}>
                   The source returned by the network matches the hash stored in the contract account. This checks source consistency only; it is not a security audit.
                   {strategy.verified ? ' Current status: match.' : ' Current status: could not verify.'}
                 </p>
@@ -538,7 +736,7 @@ export function StrategyDetail() {
                 <p className="muted" style={{ fontSize: 14, marginBottom: 14 }}>
                   Copy this setup with your own amount and interval.
                 </p>
-                <Link className="btn btn-primary" to={`/deploy?template=${strategy.template}`} style={{ width: '100%', justifyContent: 'center' }}>
+                <Link className="btn btn-primary" to={deployCopyUrl} style={{ width: '100%', justifyContent: 'center' }}>
                   Create a bot from this one
                 </Link>
               </div>
@@ -546,6 +744,7 @@ export function StrategyDetail() {
           </div>
         </div>
       </section>
+      )}
     </>
   );
 }

@@ -2,12 +2,14 @@ import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
+import { NETWORK } from '../lib/network';
 import { loadStrategies } from '../lib/registry';
 import { StrategyCard } from '../components/StrategyCard';
+import { InfoTip } from '../components/InfoTip';
 
 interface StrategyGuide {
   id: string;
-  category: 'accumulation' | 'take-profit' | 'range' | 'protection' | 'execution' | 'analytics';
+  category: 'accumulation' | 'take-profit' | 'range' | 'protection' | 'execution' | 'analytics' | 'perps';
   tag: string;
   title: string;
   subtitle: string;
@@ -131,6 +133,90 @@ const STRATEGY_GUIDES: StrategyGuide[] = [
     funding: 'Gas escrow in ASE only — no tokens required',
     recommendedFor: 'Algorithmic traders and automated trend listeners',
   },
+  {
+    id: 'perp-dca',
+    category: 'perps',
+    tag: 'AsePad Perps',
+    title: 'Perp DCA Bot',
+    subtitle: 'Automated leveraged Long / Short accumulation on perps.asepad.fun',
+    summary:
+      'Deposits isolated ASE margin into AsePad Perps Vault and scales into a leveraged Long or Short position on a fixed Cron schedule, with optional automatic Take-Profit and Stop-Loss exits.',
+    whyUse:
+      'Averages leveraged perpetual entries on-chain without leaving a bot server running, and protects the position automatically on every tick.',
+    cadence: '1 minute to 1 day',
+    funding: 'ASE Vault margin + 0.05 ASE cron escrow',
+    recommendedFor: 'Leveraged Long / Short DCA with automated TP/SL',
+  },
+  {
+    id: 'perp-trigger',
+    category: 'perps',
+    tag: 'AsePad Perps',
+    title: 'Perp Trigger Bot',
+    subtitle: 'Dip or breakout leveraged entry trigger on AsePad Perps',
+    summary:
+      'Monitors the AsePad Perps oracle mark price and opens a leveraged Long or Short automatically once your target move below or above current mark is reached, then watches optional TP/SL.',
+    whyUse:
+      'Automates conditional perpetual entries at key dips or breakouts without watching the order screen.',
+    cadence: 'Checks mark every 60s+',
+    funding: 'ASE Vault margin + 0.05 ASE cron escrow',
+    recommendedFor: 'Conditional leveraged breakouts or dip entries',
+  },
+  {
+    id: 'perp-grid',
+    category: 'perps',
+    tag: 'AsePad Perps',
+    title: 'Perp Grid Bot',
+    subtitle: 'Leveraged range grid on AsePad Perps',
+    summary:
+      'Scales into leveraged levels on step moves against your anchor price and automatically reduces each level at +step profit when the mark price rebounds.',
+    whyUse:
+      'Captures repeated oscillations on AsePad Perps using isolated contract collateral.',
+    cadence: 'Scheduled mark checks every 60s+',
+    funding: 'ASE Vault margin reserve + 0.05 ASE cron escrow',
+    recommendedFor: 'Sideways perpetual ranges with leverage',
+  },
+  {
+    id: 'perp-risk',
+    category: 'perps',
+    tag: 'AsePad Perps',
+    title: 'Perp SL / TP / Trailing Bot',
+    subtitle: 'Guarded leveraged position on AsePad Perps',
+    summary:
+      'Opens a leveraged Long or Short on AsePad Perps guarded on-chain by Stop-Loss, Take-Profit and trailing drawdown from peak favorable mark price.',
+    whyUse:
+      'Locks in upside with trailing drawdown and enforces strict downside limits automatically via Asentum Cron.',
+    cadence: 'Checked every 60s+',
+    funding: 'ASE Vault margin + 0.05 ASE cron escrow',
+    recommendedFor: 'Guarded directional perpetual positions',
+  },
+  {
+    id: 'perp-twap',
+    category: 'perps',
+    tag: 'AsePad Perps',
+    title: 'Perp TWAP Slicer',
+    subtitle: 'Timed leveraged entry slices on AsePad Perps',
+    summary:
+      'Splits a leveraged Long or Short entry into N equal timed slices across AsePad Perps oracle mark updates until the full margin allocation is deployed.',
+    whyUse:
+      'Spreads leveraged position sizing over time across multiple oracle windows.',
+    cadence: '2 to 100 timed slices',
+    funding: 'ASE Vault margin + 0.05 ASE cron escrow',
+    recommendedFor: 'Larger leveraged entries across timed intervals',
+  },
+  {
+    id: 'perp-momentum',
+    category: 'perps',
+    tag: 'AsePad Perps',
+    title: 'Perp Momentum Bot',
+    subtitle: 'Directional Long / Short momentum contract',
+    summary:
+      'Tracks consecutive AsePad Perps oracle mark changes, opening Long on upward threshold moves and closing or flipping Short on downward moves.',
+    whyUse:
+      'Follows trend swings automatically on AsePad Perps with isolated contract collateral.',
+    cadence: 'Configurable 60s+ interval',
+    funding: 'ASE Vault margin + 0.05 ASE cron escrow',
+    recommendedFor: 'Algorithmic trend strategies on AsePad Perps',
+  },
 ];
 
 type CatalogTab = 'catalog' | 'live' | 'marketplace';
@@ -172,37 +258,38 @@ export function Strategies() {
   return (
     <>
       <section className="wrap detail-head">
-        <span className="label">Strategies · Asentum testnet</span>
-        <h1 className="detail-title">Trading strategies,<br />without the terminal.</h1>
-        <p className="section-note" style={{ maxWidth: 640, marginTop: 18 }}>
-          Every strategy below is a contract you own. Read what each bot type does, inspect the live contracts
-          already executing on Asentum, or start from a shared setup.
+        <span className="label">Strategies · {NETWORK.shortLabel}</span>
+        <h1 className="detail-title">Trading strategies,<br />ready to launch.</h1>
+        <p className="section-note" style={{ marginTop: 10 }}>
+          Non-custodial contract templates you own. Pick a strategy, inspect live bots, or clone a shared setup.
+          <InfoTip
+            label="How strategy templates work"
+            text="Every strategy below deploys as an isolated smart contract owned by your wallet and scheduled via Asentum Cron—never a background server job."
+          />
         </p>
 
-        <div className="mode-switch" role="tablist" aria-label="Strategy views">
+        <div className="seg-tabs" role="tablist" aria-label="Strategy views">
           <button
             type="button"
             role="tab"
             aria-selected={activeTab === 'catalog'}
-            className={activeTab === 'catalog' ? 'mode-option active' : 'mode-option'}
+            className={activeTab === 'catalog' ? 'seg-tab active' : 'seg-tab'}
             onClick={() => setTab('catalog')}
           >
-            <span>Strategy catalog</span>
-            <small>Mechanics & bot types</small>
+            Strategy catalog
           </button>
           <button
             type="button"
             role="tab"
             aria-selected={activeTab === 'live'}
-            className={activeTab === 'live' ? 'mode-option active' : 'mode-option'}
+            className={activeTab === 'live' ? 'seg-tab active' : 'seg-tab'}
             onClick={() => setTab('live')}
           >
-            <span>Live contracts ({list.length})</span>
-            <small>Executing on-chain</small>
+            Live contracts
+            <span className="seg-tab-count">{list.length}</span>
           </button>
-          <Link to="/marketplace" className="mode-option">
-            <span>Marketplace</span>
-            <small>Shared setups</small>
+          <Link to="/marketplace" className="seg-tab">
+            Marketplace ↗
           </Link>
         </div>
       </section>
@@ -213,6 +300,7 @@ export function Strategies() {
             <div className="chip-row" style={{ marginBottom: 22 }}>
               {[
                 { id: 'all', label: `All templates (${STRATEGY_GUIDES.length})` },
+                { id: 'perps', label: 'AsePad Perps (6)' },
                 { id: 'accumulation', label: 'Accumulation' },
                 { id: 'take-profit', label: 'Take-profit' },
                 { id: 'range', label: 'Range / grid' },
@@ -249,50 +337,45 @@ export function Strategies() {
                         </span>
                       </div>
                       <h2 className="catalog-title">{guide.title}</h2>
-                      <div className="catalog-sub">{guide.subtitle}</div>
+                      <div className="catalog-sub" style={{ marginBottom: 0 }}>{guide.subtitle}</div>
 
-                      <div className="catalog-body">
-                        <div className="catalog-point">
-                          <strong>What it does</strong>
-                          <p>{guide.summary}</p>
-                        </div>
-                        <div className="catalog-point">
-                          <strong>Why use it</strong>
-                          <p>{guide.whyUse}</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="catalog-meta">
-                        <div>
-                          <span className="dim">Cadence </span>
-                          <strong>{guide.cadence}</strong>
-                        </div>
-                        <div>
-                          <span className="dim">Needs </span>
-                          <strong>{guide.funding}</strong>
-                        </div>
-                        <div>
-                          <span className="dim">Best for </span>
-                          <strong>{guide.recommendedFor}</strong>
-                        </div>
+                      <div className="catalog-pills">
+                        <span className="catalog-pill"><span>Cadence</span> {guide.cadence}</span>
+                        <span className="catalog-pill"><span>Needs</span> {guide.funding}</span>
                         {matches.length > 0 && (
-                          <div>
-                            <span className="dim">Indexed fills </span>
-                            <strong className="mono" style={{ color: 'var(--accent)' }}>
-                              {totalTrades}
-                            </strong>
-                          </div>
+                          <span className="catalog-pill"><span>Fills</span> <strong className="mono" style={{ color: 'var(--accent)' }}>{totalTrades}</strong></span>
                         )}
                       </div>
 
+                      <details className="soft-details" style={{ marginTop: 14 }}>
+                        <summary>How it works &amp; best for</summary>
+                        <div className="soft-details-body" style={{ display: 'grid', gap: 10 }}>
+                          <div>
+                            <strong style={{ color: 'var(--text)', display: 'block', marginBottom: 2 }}>What it does</strong>
+                            <span>{guide.summary}</span>
+                          </div>
+                          <div>
+                            <strong style={{ color: 'var(--text)', display: 'block', marginBottom: 2 }}>Why use it</strong>
+                            <span>{guide.whyUse}</span>
+                          </div>
+                          <div>
+                            <strong style={{ color: 'var(--text)', display: 'block', marginBottom: 2 }}>Best for</strong>
+                            <span>{guide.recommendedFor}</span>
+                          </div>
+                        </div>
+                      </details>
+                    </div>
+
+                    <div>
                       {['momentum-signal', 'momentum-trader', 'scale'].includes(guide.id) ? (
-                        <span className="muted" style={{ fontSize: 13, lineHeight: 1.6 }}>
+                        <span className="muted" style={{ fontSize: 13.5, lineHeight: 1.6 }}>
                           Advanced template · deployed from the CLI, not the simple builder
                         </span>
                       ) : (
-                        <Link to={`/deploy?template=${guide.id}`} className="btn btn-ghost">
+                        <Link
+                          to={guide.category === 'perps' ? `/deploy?template=${guide.id}&venue=perps` : `/deploy?template=${guide.id}`}
+                          className="btn btn-ghost"
+                        >
                           Use this template <span className="arr" aria-hidden="true">→</span>
                         </Link>
                       )}

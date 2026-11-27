@@ -1,10 +1,12 @@
+import { resolvePerpsModules } from './perps';
 import { getBalance, viewCall } from './rpc';
 
 /**
- * Closing a bot is one owner flow, not three separate errands: stop the
- * schedule, return the ASE balance, then reclaim unsold tokens. The contracts
- * still expose these as separate methods, so this helper sends them in order
- * and reports each wallet signature through `onProgress`.
+ * Closing a bot is one owner flow, not separate errands: stop the
+ * schedule, close any open AsePad Perps position & pull vault collateral (for
+ * perp bots), return the ASE balance, then reclaim unsold tokens. The
+ * contracts expose these as separate methods, so this helper sends them in
+ * order and reports each wallet signature through `onProgress`.
  */
 
 type ChainClient = {
@@ -12,7 +14,7 @@ type ChainClient = {
   waitReceipt(hash: string, timeoutMs?: number): Promise<{ success: boolean }>;
 };
 
-export type BotStepMethod = 'stop' | 'withdraw' | 'withdrawTokens';
+export type BotStepMethod = 'stop' | 'closePosition' | 'withdraw' | 'withdrawTokens';
 
 export interface BotCloseResult {
   stopped: boolean;
@@ -30,8 +32,11 @@ export interface BotCloseOptions {
   /** Owner address that receives the funds. */
   recipient: string;
   token: string | null;
-  /** momentum-signal has no withdrawTokens method. */
+  /** momentum-signal and perp-* bots have no withdrawTokens method. */
   supportsTokenWithdraw: boolean;
+  /** Perps contract bots expose closePosition() to unwind open leverage and pull Vault collateral. */
+  supportsPerpClose?: boolean;
+  perpMarketId?: string | null;
   needsStop: boolean;
   onProgress?: (message: string) => void;
   onStopped?: () => void;
@@ -46,6 +51,8 @@ export async function closeBot(options: BotCloseOptions): Promise<BotCloseResult
     recipient,
     token,
     supportsTokenWithdraw,
+    supportsPerpClose,
+    perpMarketId,
     needsStop,
     onProgress,
     onStopped,
@@ -62,7 +69,7 @@ export async function closeBot(options: BotCloseOptions): Promise<BotCloseResult
    * read the chain before asking the user to sign again.
    */
   const transientFailure = (message: string) =>
-    /unexpected token|not valid json|<html|bad gateway|gateway time-?out|\b50[24]\b|timed out|receipt timeout|failed to fetch|network ?error|load failed/i.test(message);
+    /unexpected token|not valid json|<html|bad gateway|gateway time-?out|\b50[24]\b|timed out|receipt timeout|failed to fetch|network ?error|load failed|429|too many requests|rate[- ]?limit/i.test(message);
 
   const waitFor = async (isDone: () => Promise<boolean>, timeoutMs = 9_000): Promise<boolean> => {
     const deadline = Date.now() + timeoutMs;
@@ -83,12 +90,21 @@ export async function closeBot(options: BotCloseOptions): Promise<BotCloseResult
     }
   };
 
+  const labelFor = (method: BotStepMethod) => {
+    switch (method) {
+      case 'stop': return 'stop the schedule';
+      case 'closePosition': return 'close the open perp position and reclaim vault margin';
+      case 'withdraw': return 'return the ASE balance';
+      case 'withdrawTokens': return 'return the unsold tokens';
+    }
+  };
+
   const send = async (
     method: BotStepMethod,
     args: string[] = [],
     isDone?: () => Promise<boolean>,
   ) => {
-    const label = method === 'stop' ? 'stop the schedule' : method === 'withdraw' ? 'return the ASE balance' : 'return the unsold tokens';
+    const label = labelFor(method);
     promptNumber += 1;
     onProgress?.(`Wallet approval ${promptNumber}: ${label}. Confirm it in your wallet…`);
     try {
@@ -123,8 +139,31 @@ export async function closeBot(options: BotCloseOptions): Promise<BotCloseResult
     onStopped?.();
   }
 
-  // Read after stopping: the receipt refunds unused cron escrow into the
-  // contract, so the closing balance is the one to send back.
+  // If this is a Perps bot and stop() could not automatically unwind the vault
+  // position/margin (e.g. due to temporary oracle issue or previous manual stop),
+  // invoke closePosition() before withdrawing ASE from the contract.
+  if (supportsPerpClose && perpMarketId) {
+    const mods = await resolvePerpsModules().catch(() => null);
+    if (mods) {
+      const checkVaultRemaining = async (): Promise<boolean> => {
+        const [posRaw, freeRaw] = await Promise.all([
+          viewCall<unknown>(mods.vault, 'position', [balanceAddress, perpMarketId]).catch(() => null),
+          viewCall<string>(mods.vault, 'freeCollateral', [balanceAddress, perpMarketId]).catch(() => '0'),
+        ]);
+        const posObj = typeof posRaw === 'string' ? JSON.parse(posRaw) : posRaw;
+        const size = BigInt(String((posObj as Record<string, unknown> | null)?.sizeWei ?? '0'));
+        const free = BigInt(String(freeRaw).replace(/"/g, '') || '0');
+        return size === 0n && free === 0n;
+      };
+      const cleared = await checkVaultRemaining().catch(() => true);
+      if (!cleared) {
+        await send('closePosition', [], checkVaultRemaining);
+      }
+    }
+  }
+
+  // Read after stopping (and vault reclaim): the receipts refund unused cron
+  // escrow and vault collateral into the contract, so this is the closing ASE balance.
   const aseWithdrawn = BigInt((await getBalance(balanceAddress).catch(() => ({ balance: '0', nonce: '0' }))).balance || '0');
   if (aseWithdrawn > 0n) {
     await send('withdraw', [recipient, aseWithdrawn.toString()], async () =>

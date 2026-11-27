@@ -1,5 +1,8 @@
 import { Link } from 'react-router-dom';
-import { BOT_TYPES, TEMPLATES } from '../lib/templates';
+import { IS_TESTNET, NETWORK } from '../lib/network';
+import { PERPS_APP_URL } from '../lib/perps';
+import { EXPLORER_URL } from '../lib/rpc';
+import { BOT_TYPES, PERP_BOT_TYPES, TEMPLATES } from '../lib/templates';
 
 const NAV = [
   { id: 'overview', label: 'Overview' },
@@ -16,28 +19,28 @@ const NAV = [
 const STEPS = [
   {
     number: '01',
-    title: 'Choose what you want the bot to do',
-    text: 'Pick one of five behaviours: DCA, take-profit, grid, stop-loss or TWAP. Every field is plain language, and the review panel shows exactly what the bot will do before you sign.',
+    title: 'Choose Spot AMM or AsePad Perps',
+    text: 'Pick between Spot AMM bots (DCA, take-profit, grid, stop-loss, TWAP on Auras/AseDex) or AsePad Perps bots (autonomous Cron contracts or direct perps.asepad.fun keeper orders with Long/Short & leverage).',
   },
   {
     number: '02',
-    title: 'Set the market and the limits',
-    text: 'Select a live Auras or AseDex pool. Enter the token allocation or ASE budget, the schedule and, for risk-managed strategies, stop-loss, take-profit, drawdown and daily loss limits.',
+    title: 'Set the market, leverage and limits',
+    text: 'For Spot, pick an Auras or AseDex pool and allocation. For Perps, pick a live AsePad market, direction (Long/Short), leverage, margin and TP/SL or trailing rules.',
   },
   {
     number: '03',
     title: 'Review the budget, then sign',
-    text: 'Strata checks the live token balance, token decimals and the minimum cron escrow before your wallet is asked to sign. The token budget and the gas budget are shown separately.',
+    text: 'Strata checks live balances, market minimums, oracle health and cron escrow before your wallet is asked to sign. Margin/token budgets and gas escrow are shown separately.',
   },
   {
     number: '04',
     title: 'The network runs the schedule',
-    text: 'The strategy registers with the Asentum Cron Registry. No browser tab and no private server needs to stay open; each run spends from the funded escrow.',
+    text: 'Contract bots register with the Asentum Cron Registry; direct Perps orders sit on AsePad Engine for AsePad keepers. No browser tab needs to stay open.',
   },
   {
     number: '05',
     title: 'Monitor, stop and withdraw',
-    text: 'Follow fills and estimates on the strategy page. The owner can stop the schedule, withdraw remaining ASE and reclaim unsold tokens. Unused escrow returns to the contract.',
+    text: 'Follow fills, open positions and vault margin on the strategy page or Portfolio. Closing a Perp bot unwinds any open position, reclaims AsePad Vault margin and returns ASE to your wallet.',
   },
 ];
 
@@ -78,7 +81,7 @@ export function How() {
 
       <div className="doc-content">
         <section id="overview">
-          <span className="label">Strata docs · Asentum testnet</span>
+          <span className="label">Strata docs · {NETWORK.shortLabel}</span>
           <h1 style={{ marginTop: 14 }}>Automated strategies, documented end to end.</h1>
           <p>
             Strata turns a set of trading rules into a JavaScript contract on Asentum. The network calls that
@@ -86,9 +89,10 @@ export function How() {
             stopping and withdrawal — is a transaction your wallet signs.
           </p>
           <p>
-            There is one builder: five guided bot types, a plain-language review, and a few wallet prompts. No raw
-            configuration and no code needed. The three advanced templates still ship in <code>contracts/</code>{' '}
-            for CLI deployments, but they are not part of the simple flow.
+            The builder now supports both venues: five guided Spot AMM bots, six autonomous AsePad Perps Cron bots,
+            plus five direct <a href="https://perps.asepad.fun/" target="_blank" rel="noreferrer" className="link-arrow">perps.asepad.fun</a> keeper
+            order types (TWAP/DCA, Scale, Limit+TP/SL, Trailing Stop and Stop/TP). Three advanced Spot templates still ship
+            in <code>contracts/</code> for CLI deployments.
           </p>
           <div className="doc-hero-actions">
             <Link className="btn btn-primary" to="/deploy">
@@ -122,8 +126,9 @@ export function How() {
         <section id="templates">
           <h2>Templates</h2>
           <p>
-            Eight contracts are supported. Five are available in the builder; the other three are advanced
-            templates deployed from the CLI.
+            Fourteen strategy contracts ship in <code>contracts/</code>: eleven are available directly in the web builder
+            (five Spot AMM + six AsePad Perps), and three advanced Spot templates are deployed from the CLI. Direct
+            <code> perps.asepad.fun</code> native orders are also supported from the builder without deploying a custom contract.
           </p>
 
           <div className="table-scroll">
@@ -138,12 +143,13 @@ export function How() {
               </thead>
               <tbody>
                 {TEMPLATES.map((template) => {
-                  const guided = BOT_TYPES.find((bot) => bot.templateId === template.id);
+                  const guided = BOT_TYPES.find((bot) => bot.templateId === template.id)
+                    ?? PERP_BOT_TYPES.find((bot) => bot.templateId === template.id);
                   const needs =
                     template.requires === 'gas'
                       ? 'ASE gas escrow only'
                       : template.requires === 'ase'
-                        ? 'ASE budget + escrow'
+                        ? (template.venue === 'perps' ? 'ASE Vault margin + escrow' : 'ASE budget + escrow')
                         : template.requires === 'both'
                           ? 'Tokens + ASE reserve + escrow'
                           : 'Token allocation + escrow';
@@ -152,7 +158,7 @@ export function How() {
                       <td>
                         {template.name}
                         <span className="dim" style={{ display: 'block', fontSize: 12.5, fontWeight: 400, marginTop: 3 }}>
-                          {guided ? 'Simple builder' : 'CLI only'}
+                          {guided ? `${template.venue === 'perps' ? 'Perps builder' : 'Spot builder'}` : 'CLI only'}
                         </span>
                       </td>
                       <td>{needs}</td>
@@ -194,9 +200,10 @@ export function How() {
             choose the execution interval separately in the builder.
           </p>
           <p>
-            <strong style={{ color: 'var(--text)' }}>Perps are a separate product.</strong> They require long/short positions,
-            margin, leverage, funding, mark/index prices and liquidation rules from a real derivatives venue. No such
-            provider is connected here, so the Perps panel is disabled. Spot bots must never be described as Perps.
+            <strong style={{ color: 'var(--text)' }}>AsePad Perps is live.</strong> Switch to the AsePad Perps tab in
+            Advanced Trading (or in the Bot Builder) to trade leveraged Long/Short markets on{' '}
+            <a href="https://perps.asepad.fun/" target="_blank" rel="noreferrer" className="link-arrow">perps.asepad.fun</a>,
+            manage isolated/cross Vault collateral, post native Limit/DCA/Scale/Trailing orders, or launch autonomous Perps Cron bots.
           </p>
           <div className="doc-hero-actions">
             <Link className="btn btn-primary" to="/advanced">Open Advanced Trading</Link>
@@ -207,7 +214,7 @@ export function How() {
         <section id="tokens-wallets">
           <h2>Tokens & wallet registry</h2>
           <p>
-            Create Token deploys a user-owned ARC-20 contract to the Asentum testnet and initializes a fixed supply
+            Create Token deploys a user-owned ARC-20 contract to {NETWORK.shortLabel} and initializes a fixed supply
             to the deploying wallet. The token contract has no hidden mint, tax, blacklist or pause function.
             Token deployment and initialization are separate wallet-confirmed transactions; if initialization fails,
             the deployed contract can be recovered and initialized again.
@@ -256,7 +263,7 @@ export function How() {
         <section id="limits">
           <h2>Risk & limits</h2>
           <p>
-            Read this before funding any strategy. Strata is experimental testnet software and not investment
+            Read this before funding any strategy. Strata is {IS_TESTNET ? 'experimental testnet software' : 'non-custodial on-chain software'} and not investment
             advice.
           </p>
           <ul>
@@ -292,7 +299,7 @@ export function How() {
             <a className="doc-link" href="https://www.asentum.com/docs/guides/scheduled-calls" target="_blank" rel="noreferrer">
               Scheduled calls guide <span aria-hidden="true">↗</span>
             </a>
-            <a className="doc-link" href="https://explorer.asentum.com" target="_blank" rel="noreferrer">
+            <a className="doc-link" href={EXPLORER_URL} target="_blank" rel="noreferrer">
               Asentum explorer <span aria-hidden="true">↗</span>
             </a>
             <a className="doc-link" href="https://auras.finance" target="_blank" rel="noreferrer">
@@ -300,6 +307,9 @@ export function How() {
             </a>
             <a className="doc-link" href="https://asepad.fun" target="_blank" rel="noreferrer">
               AsePad / AseDex <span aria-hidden="true">↗</span>
+            </a>
+            <a className="doc-link" href={PERPS_APP_URL} target="_blank" rel="noreferrer">
+              AsePad Perps <span aria-hidden="true">↗</span>
             </a>
             <a className="doc-link" href="https://github.com/Juniorj87/strata" target="_blank" rel="noreferrer">
               Strata source repository <span aria-hidden="true">↗</span>

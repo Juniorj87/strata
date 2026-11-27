@@ -1,3 +1,4 @@
+import { chainStorageKey } from './network';
 import { toHexAddress, getBalance, viewCall } from './rpc';
 import type { LivePool } from './registry';
 
@@ -6,9 +7,13 @@ export interface DeployedStrategyRecord {
   template: string;
   templateName?: string;
   poolId: string;
+  marketId?: string;
   tokenSymbol: string;
   tokenAddress: string;
-  venue: 'auras' | 'asedex';
+  venue: 'auras' | 'asedex' | 'asepad-perps';
+  executionMode?: 'contract' | 'direct';
+  side?: 'LONG' | 'SHORT';
+  leverage?: number;
   deployTxHash: string;
   initTxHash?: string;
   transferTxHash?: string;
@@ -28,7 +33,7 @@ export interface DeployedStrategyRecord {
 
 export interface UserTxRecord {
   hash: string;
-  type: 'deploy' | 'init' | 'fund' | 'register' | 'cancel' | 'withdraw';
+  type: 'deploy' | 'init' | 'fund' | 'register' | 'cancel' | 'withdraw' | 'perps';
   description: string;
   timestamp: number;
   status: 'pending' | 'confirmed' | 'failed';
@@ -49,9 +54,9 @@ export interface UserTokenHolding {
   isNative?: boolean;
 }
 
-const STRATEGIES_PREFIX = 'strata:user_strategies:';
-const ALL_STRATEGIES_KEY = 'strata:all_user_strategies';
-const TXS_PREFIX = 'strata:user_txs:';
+const STRATEGIES_PREFIX = chainStorageKey('strata:user_strategies:');
+const ALL_STRATEGIES_KEY = chainStorageKey('strata:all_user_strategies');
+const TXS_PREFIX = chainStorageKey('strata:user_txs:');
 
 export function saveUserStrategy(record: DeployedStrategyRecord): void {
   if (typeof window === 'undefined' || !window.localStorage) return;

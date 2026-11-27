@@ -5,10 +5,10 @@
  *   node --experimental-strip-types scripts/check-verify.ts
  */
 import { blake3 } from '@noble/hashes/blake3.js';
-import { AURAS_AMM, getContractSource } from '../src/lib/rpc.ts';
+import { AURAS_AMM, getAccountMeta, getContractSource } from '../src/lib/rpc.ts';
 
 const source = await getContractSource(AURAS_AMM);
-const meta = await fetch(`https://explorer.asentum.com/asentum/account/${AURAS_AMM}`).then((r) => r.json());
+const meta = await getAccountMeta(AURAS_AMM);
 const target = String(meta.codeHash).replace(/^0x/, '').toLowerCase();
 
 const encoder = new TextEncoder();

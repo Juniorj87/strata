@@ -11,6 +11,7 @@ import {
   getBalance,
   getContractSource,
   getCronJob,
+  getLogs,
   getPool,
   getReceipt,
   getRecentNetworkTxs,
@@ -22,10 +23,14 @@ import {
   toHexAddress,
   viewCall,
 } from './rpc';
+import { CHAIN_ID } from './network';
+import { loadPerpsMarkets, resolvePerpsModules } from './perps';
 import { getUserStrategies } from './userStrategies';
 import configured from '../config/strategies.json';
 
-const CONFIGURED = configured as unknown as { address: string; template?: string; pool?: string }[];
+const CONFIGURED = CHAIN_ID === 1423
+  ? (configured as unknown as { address: string; template?: string; pool?: string }[])
+  : [];
 
 export interface StrategyEvent {
   block: number;
@@ -83,6 +88,22 @@ export interface LiveStrategy {
   fillsCapped: boolean;
   discovery: 'configured' | 'scan' | 'user';
   historyComplete: boolean;
+  venue?: 'auras' | 'asedex' | 'asepad-perps';
+  marketId?: string | null;
+  perpSide?: 'LONG' | 'SHORT' | null;
+  perpLeverage?: number | null;
+  rawConfig?: Record<string, string>;
+  perpPosition?: {
+    sizeWei: string;
+    entryPriceWei: string;
+    collateralWei: string;
+    reservedWei: string;
+    freeCollateralWei: string;
+    markPriceWei: string;
+    unrealisedPnlWei: string;
+    fundingDebtWei: string;
+    realizedPnlWei: string;
+  } | null;
 }
 
 const TEMPLATE_RE = /Strata template:\s*([a-z-]+)/i;
@@ -91,7 +112,13 @@ function parseTemplate(source: string): { name: string; template: string } {
   const match = source.match(TEMPLATE_RE);
   let template = match ? match[1].toLowerCase() : 'custom';
   if (template === 'custom') {
-    if (source.includes("return 'dca'") || source.includes("template:'dca'") || source.includes("template: 'dca'")) template = 'dca';
+    if (source.includes("return 'perp-dca'")) template = 'perp-dca';
+    else if (source.includes("return 'perp-trigger'")) template = 'perp-trigger';
+    else if (source.includes("return 'perp-grid'")) template = 'perp-grid';
+    else if (source.includes("return 'perp-risk'")) template = 'perp-risk';
+    else if (source.includes("return 'perp-twap'")) template = 'perp-twap';
+    else if (source.includes("return 'perp-momentum'")) template = 'perp-momentum';
+    else if (source.includes("return 'dca'") || source.includes("template:'dca'") || source.includes("template: 'dca'")) template = 'dca';
     else if (source.includes("return 'grid'") || source.includes("template:'grid'") || source.includes("template: 'grid'")) template = 'grid';
     else if (source.includes("return 'twap'") || source.includes("template:'twap'") || source.includes("template: 'twap'")) template = 'twap';
     else if (source.includes('risk-managed')) template = 'risk-managed';
@@ -304,9 +331,10 @@ export async function loadStrategy(
   // response. The old code pulled the 500-contract index (~35 MB) for every
   // strategy, which is what made Activity and Leaderboard stall on a busy
   // gateway.
-  const [ownerResult, statusResult] = await Promise.all([
+  const [ownerResult, statusResult, configResult] = await Promise.all([
     viewCall<unknown>(hex, 'getOwner', []).catch(() => ''),
     viewCall<unknown>(hex, 'getStatus', []).catch(() => ''),
+    options?.light ? Promise.resolve('') : viewCall<unknown>(hex, 'getConfig', []).catch(() => ''),
   ]);
 
   let status: Record<string, unknown> = {};
@@ -315,7 +343,25 @@ export async function loadStrategy(
     status = decoded && typeof decoded === 'object' ? decoded as Record<string, unknown> : {};
   } catch { status = {}; }
 
+  const rawConfig: Record<string, string> = {};
+  try {
+    const decodedCfg = typeof configResult === 'string' && configResult ? JSON.parse(configResult) as unknown : configResult;
+    const merged = {
+      ...status,
+      ...(decodedCfg && typeof decodedCfg === 'object' && !Array.isArray(decodedCfg) ? decodedCfg as Record<string, unknown> : {}),
+    };
+    for (const [k, v] of Object.entries(merged)) {
+      if (typeof v === 'string' || typeof v === 'number') rawConfig[k] = String(v);
+    }
+  } catch {
+    for (const [k, v] of Object.entries(status)) {
+      if (typeof v === 'string' || typeof v === 'number') rawConfig[k] = String(v);
+    }
+  }
+
   let token = status.token ? String(status.token) : null;
+  const isPerp = template.startsWith('perp-') || status.venue === 'asepad-perps';
+  const marketId = status.marketId ? String(status.marketId) : null;
   const poolId = status.poolId ? String(status.poolId) : null;
   const intervalSec = status.intervalSec !== undefined && status.intervalSec !== null && Number.isFinite(Number(status.intervalSec))
     ? Number(status.intervalSec)
@@ -336,6 +382,32 @@ export async function loadStrategy(
         receiptsResolved: true,
       }
     : await fetchStrategyAccounting(hex);
+
+  // Perp strategies execute against AsePad Perps Vault/Engine rather than spot
+  // ARC-20 transfers, so also scan bounded contract logs when fillEvents is empty.
+  if (!options?.light && isPerp && accounting.fills.length === 0) {
+    const rawLogs = await getLogs(hex).catch(() => []);
+    for (const log of rawLogs) {
+      if (!log.args) continue;
+      const evName = classify(log.args);
+      if (evName === 'Fill' || 'sizeWei' in log.args || 'sizeDelta' in log.args) {
+        accounting.fills.push({
+          block: log.blockNumber,
+          name: 'Fill',
+          args: log.args,
+          txHash: log.txHash,
+        });
+      } else {
+        accounting.lifecycle.push({
+          block: log.blockNumber,
+          name: evName,
+          args: log.args,
+          txHash: log.txHash,
+        });
+      }
+    }
+  }
+
   const tokenTransfers = token
     ? accounting.tokenTransfers.filter((event) => String(event.args.token ?? '') === token!.toLowerCase())
     : accounting.tokenTransfers;
@@ -343,8 +415,61 @@ export async function loadStrategy(
   const cronJob = jobId ? await getCronJob(jobId).catch(() => null) : null;
   let poolSymbol: string | null = null;
   let tokenDecimals: number | null = null;
+  let perpPosition: LiveStrategy['perpPosition'] = null;
 
-  if (poolId) {
+  if (isPerp && marketId) {
+    try {
+      const [perpMarkets, mods] = await Promise.all([
+        loadPerpsMarkets().catch(() => []),
+        resolvePerpsModules().catch(() => null),
+      ]);
+      const matchedMkt = perpMarkets.find((m) => m.id === marketId);
+      if (matchedMkt) {
+        poolSymbol = matchedMkt.symbol;
+        tokenDecimals = matchedMkt.decimals;
+        if (!token) token = matchedMkt.baseToken;
+      } else if (token) {
+        const [sym, dec] = await Promise.all([
+          viewCall<string>(token, 'symbol', []).catch(() => null),
+          viewCall<string | number>(token, 'decimals', []).catch(() => 18),
+        ]);
+        poolSymbol = sym ? String(sym).replace(/^"|"$/g, '') : `MKT#${marketId}`;
+        tokenDecimals = Number(dec) || 18;
+      }
+      if (mods) {
+        const [acctRaw, posRaw, freeRaw, obsRaw] = await Promise.all([
+          viewCall<unknown>(mods.vault, 'account', [hex, marketId]).catch(() => null),
+          viewCall<unknown>(mods.vault, 'position', [hex, marketId]).catch(() => null),
+          viewCall<string>(mods.vault, 'freeCollateral', [hex, marketId]).catch(() => '0'),
+          viewCall<unknown>(mods.oracle, 'observation', [marketId]).catch(() => null),
+        ]);
+        const acct = typeof acctRaw === 'string' ? JSON.parse(acctRaw) as Record<string, string> : (acctRaw as Record<string, string> | null) ?? {};
+        const pos = typeof posRaw === 'string' ? JSON.parse(posRaw) as Record<string, string> : (posRaw as Record<string, string> | null) ?? {};
+        const obs = typeof obsRaw === 'string' ? JSON.parse(obsRaw) as Record<string, string> : (obsRaw as Record<string, string> | null) ?? {};
+        const coll = BigInt(acct.collateralWei || '0');
+        const sz = BigInt(pos.sizeWei || '0');
+        const entry = BigInt(pos.entryPrice || '0');
+        const mark = BigInt(obs?.mark || matchedMkt?.markPriceWei || '0');
+        const debt = BigInt(pos.fundingDebtWei || '0');
+        const upnl = sz !== 0n && mark > 0n && entry > 0n
+          ? ((sz < 0n ? -sz : sz) * (mark - entry) * (sz > 0n ? 1n : -1n)) / (10n ** 18n)
+          : 0n;
+        perpPosition = {
+          sizeWei: sz.toString(),
+          entryPriceWei: entry.toString(),
+          collateralWei: coll.toString(),
+          reservedWei: String(acct.reservedWei || '0'),
+          freeCollateralWei: String(freeRaw || '0').replace(/"/g, ''),
+          markPriceWei: mark.toString(),
+          unrealisedPnlWei: upnl.toString(),
+          fundingDebtWei: debt.toString(),
+          realizedPnlWei: String(pos.realizedPnlWei || '0'),
+        };
+      }
+    } catch {
+      // perps state unavailable
+    }
+  } else if (poolId) {
     const cachedPools = typeof window !== 'undefined' ? (readSavedPools() ?? []) : [];
     const matched = cachedPools.find((p) => String(p.id) === String(poolId) && (!token || p.token.toLowerCase() === token.toLowerCase()))
       ?? cachedPools.find((p) => String(p.id) === String(poolId));
@@ -377,7 +502,10 @@ export async function loadStrategy(
 
   let tokenBalance = '0';
   let markValueAseWei: string | null = null;
-  if (token) {
+  if (isPerp && perpPosition) {
+    const equity = BigInt(perpPosition.collateralWei) + BigInt(perpPosition.unrealisedPnlWei) - BigInt(perpPosition.fundingDebtWei);
+    markValueAseWei = (equity > 0n ? equity : 0n).toString();
+  } else if (token) {
     tokenBalance = String(await viewCall<unknown>(token, 'balanceOf', [hex]).catch(() => '0')).replace(/"/g, '');
     if (poolId && BigInt(tokenBalance || '0') > 0n) {
       const quote = await viewCall<unknown>(AURAS, 'quote', [poolId, token, tokenBalance]).catch(() => null);
@@ -405,13 +533,28 @@ export async function loadStrategy(
     return Number.isFinite(count) ? count : 0;
   };
   // `ticks` counts scheduled runs, not filled orders, so it is never used here.
-  const contractTrades = asCount(status.legs ?? status.legsDone)
+  const contractTrades = asCount(status.legs ?? status.legsDone ?? status.trades)
     || asCount(status.buyLevel) + asCount(status.sellLevel);
   const trades = Math.max(fills.length, contractTrades);
 
   // When the transfer index shows no swaps, fall back to the contract's own
   // cumulative counters, which are still chain state - never to a guess.
-  if (fills.length === 0) {
+  if (isPerp) {
+    const fillMargin = fills.reduce((sum, event) => sum + toUnits(event.args.marginWei), 0n);
+    const statusMargin = toUnits(status.spentMarginWei ?? status.marginWei ?? perpPosition?.collateralWei ?? 0);
+    spentAseWei = fillMargin > 0n ? fillMargin : statusMargin;
+    const realized = (() => {
+      try {
+        const val = BigInt(perpPosition?.realizedPnlWei || '0');
+        return val > 0n ? val : 0n;
+      } catch {
+        return 0n;
+      }
+    })();
+    receivedAseWei = realized;
+    soldTokenWei = 0n;
+    boughtTokenWei = 0n;
+  } else if (fills.length === 0) {
     receivedAseWei = toUnits(status.earned ?? status.earnedAseWei ?? status.realisedAseWei ?? 0);
     spentAseWei = toUnits(status.spentAseWei ?? status.buySpentAseWei ?? 0);
     soldTokenWei = 0n;
@@ -503,6 +646,16 @@ export async function loadStrategy(
       && fills.length >= contractTrades
       && transferHistoryComplete,
     ),
+    venue: isPerp
+      ? 'asepad-perps'
+      : String(status.ammAddress ?? '').toLowerCase() === ASEDEX_AMM.toLowerCase()
+        ? 'asedex'
+        : 'auras',
+    marketId,
+    perpSide: status.side === 'LONG' || status.side === 'SHORT' ? status.side : null,
+    perpLeverage: status.leverage ? Number(status.leverage) || null : null,
+    rawConfig: Object.keys(rawConfig).length > 0 ? rawConfig : undefined,
+    perpPosition,
   };
 }
 

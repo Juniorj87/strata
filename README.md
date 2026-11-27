@@ -145,7 +145,7 @@ The Swap screen quotes every live pool on both Auras and AseDex, then executes t
 
 ![Strata Swap](docs/screenshots/swap.png)
 
-The Spot ticket supports Market, supported Auras v2 escrowed Limit orders, and Bot mode. Bot mode deploys an existing spot strategy contract for the selected pool. Stop-loss/take-profit are scheduled spot exit conditions, not Perps positions. Chart controls include EMA 20/50 and locally saved horizontal price levels. Perps (long/short, leverage, margin and liquidation) remain a separate unavailable integration until a real venue publishes its contract/API. This is not an AseDex-only limitation: both Auras and AseDex are spot AMMs, not derivatives engines.
+The Spot ticket supports Market, supported Auras v2 escrowed Limit orders, and Bot mode. Bot mode deploys an existing spot strategy contract for the selected pool. Stop-loss/take-profit are scheduled spot exit conditions, not Perps positions. Chart controls include EMA 20/50 and locally saved horizontal price levels. Switching to the **AsePad Perps** tab connects directly to [`perps.asepad.fun`](https://perps.asepad.fun/) contracts (`0x37d25f3a292f0642af72d6f161eafb18c76e16a6`) for leveraged Long/Short markets, Vault collateral, direct keeper orders (TWAP/DCA, Scale, Limit+TP/SL, Trailing Stop, Stop/TP) and six autonomous Perps Cron bot contracts.
 
 - Pair selector over live ASE pools, with indexed 24h price, volume and liquidity.
 - Candlestick chart from real indexed Swap events: 1m, 5m, 15m, 30m (2×15m), 1h, 4h, 1d and 1w (7×1d). Zoom, pan, hover OHLC and volume.
@@ -153,7 +153,7 @@ The Spot ticket supports Market, supported Auras v2 escrowed Limit orders, and B
 - Limit orders are genuine escrowed Auras v2 orders (`createLimitOrder` / `cancelLimitOrder`), filled against the pool by cron. They are not presented as an order book, and AseDex / legacy Auras v1 pools are market-order only because the module is deployed beside Auras v2.
 - Every chart and price is normalised to ASE per token, including pools where ASE is token0.
 - Open orders, balances and the live trade tape are read from chain state / the Auras indexer. The selected on-chain pool ID and venue are carried into the bot builder so a bot can be created for the market being viewed.
-- Perpetuals show an explicit "not connected" status; no perp price or position is simulated.
+- AsePad Perps reads live markets, mark prices, funding indices, Vault collateral, open positions and native orders from chain state and delegates signing to the user's wallet.
 
 ![Strata Advanced Trading](docs/screenshots/advanced.png)
 

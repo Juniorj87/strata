@@ -1,16 +1,15 @@
 # Known Issues and Verification Notes
 
-Last reviewed: 2026-11-13
+Last reviewed: 2026-11-27
 
 This file records limitations that are visible from the current source tree. A feature being present in source is not proof that a live transaction has succeeded.
 
 ## Known product limitations
 
-### Perpetual futures are not connected
-- **Status:** Not implemented / waiting for a public provider.
-- **Description:** `src/lib/perps.ts` exposes an adapter boundary only. No public AsePad contract address, ABI or API is configured in this project.
-- **Impact:** Long/short, leverage, margin, funding, liquidation and perp position management are unavailable.
-- **Expected behaviour:** The UI must keep the provider status explicit and must not derive perp prices or positions from spot AMM data.
+### Perpetual futures integration (AsePad Perps)
+- **Status:** Connected via AsePad Perps contracts (`0x37d25f3a292f0642af72d6f161eafb18c76e16a6`).
+- **Description:** `src/lib/perps.ts` resolves the live AsePad Perps modules (`engine`, `orders`, `liquidation`, `markets`, `vault`, `oracle`), `src/components/PerpsTerminal.tsx` and `src/components/PerpsBotBuilder.tsx` expose manual trading, direct keeper orders and six autonomous `perp-*` Cron contracts.
+- **Impact:** Live-chain execution and closing flows still require Asentum testnet access and explicit wallet confirmation. Only native ASE-margined active AsePad Perps markets are supported by the `perp-*` bot contracts.
 
 ### Order-book trading is not available
 - **Status:** Not implemented as an order book.

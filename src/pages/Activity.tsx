@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
+import { NETWORK } from '../lib/network';
 import { explorerTxUrl, getHeads } from '../lib/rpc';
 import { loadPools, loadTape } from '../lib/registry';
 import { loadProtocol, type ProtocolFill } from '../lib/protocol';
@@ -77,21 +78,20 @@ export function Activity() {
   return (
     <>
       <section className="wrap detail-head">
-        <span className="label">Activity · Asentum testnet</span>
+        <span className="label">Activity · {NETWORK.shortLabel}</span>
         <h1 className="detail-title">
           Every execution,
           <br />
           in order.
         </h1>
-        <p className="section-note" style={{ maxWidth: 660, marginTop: 18 }}>
-          A chronological ledger of the fills indexed from verified Strata contracts, plus the swaps flowing through
-          the Auras pools right now. Each row links back to its transaction and the strategy that produced it.
+        <p className="section-note" style={{ marginTop: 10 }}>
+          Chronological fills from verified Strata contracts and live Auras pool swaps.
         </p>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 22 }}>
+        <div className="advanced-head-actions" style={{ marginTop: 16 }}>
           <Link className="btn btn-ghost btn-sm" to="/leaderboard">
             ← Leaderboard
           </Link>
-          <Link className="btn btn-ghost btn-sm" to="/deploy">
+          <Link className="btn btn-primary btn-sm" to="/deploy">
             Create a bot
           </Link>
         </div>
@@ -109,32 +109,32 @@ export function Activity() {
           </span>
         </div>
 
-        <div className="stat-strip" style={{ borderTop: 0, marginBottom: 26 }}>
-          <div className="stat">
+        <div className="kpi-strip">
+          <div className="kpi-card">
             <span className="label">Fills indexed</span>
-            <div className="stat-value">{snapshot ? fmtNum(fills.length) : '—'}</div>
-            <span className="stat-sub">{tradedStrategies.length} strategies with execution history</span>
+            <strong className="mono">{snapshot ? fmtNum(fills.length) : '—'}</strong>
+            <small>{tradedStrategies.length} strategies with execution history</small>
           </div>
-          <div className="stat">
+          <div className="kpi-card">
             <span className="label">Buys / sells</span>
-            <div className="stat-value">
+            <strong className="mono">
               {snapshot ? `${fmtNum(snapshot.stats.buyFills)} / ${fmtNum(snapshot.stats.sellFills)}` : '—'}
-            </div>
-            <span className="stat-sub">Token bought / sold against ASE</span>
+            </strong>
+            <small>Token bought / sold against ASE</small>
           </div>
-          <div className="stat">
+          <div className="kpi-card">
             <span className="label">Latest fill</span>
-            <div className="stat-value">{fills[0] ? `#${fills[0].block.toLocaleString('en-US')}` : '—'}</div>
-            <span className="stat-sub">
+            <strong className="mono">{fills[0] ? `#${fills[0].block.toLocaleString('en-US')}` : '—'}</strong>
+            <small>
               {fills[0] ? fmtAgeFrom(fills[0].timestamp) : `Finalized #${(heads.data?.finalized ?? 0).toLocaleString('en-US')}`}
-            </span>
+            </small>
           </div>
-          <div className="stat">
+          <div className="kpi-card">
             <span className="label">Coverage</span>
-            <div className="stat-value" style={{ fontSize: 17, paddingTop: 6 }}>
+            <strong className="mono" style={{ fontSize: 18 }}>
               {blockRange ? `${blockRange.from.toLocaleString('en-US')}–${blockRange.to.toLocaleString('en-US')}` : '—'}
-            </div>
-            <span className="stat-sub">Block range of indexed fills</span>
+            </strong>
+            <small>Block range of indexed fills</small>
           </div>
         </div>
 
@@ -407,14 +407,17 @@ export function Activity() {
               </div>
             </div>
 
-            <p className="muted" style={{ fontSize: 13.5, lineHeight: 1.7 }}>
-              Fills are read from the transfers of verified strategy contracts, resolved against the swap receipt of
-              the same transaction. Timestamps come from the receipt, so every row shows the real execution time.
-              {truncated ? ' Some fills predate the index window and show — instead of a time.' : ''}{' '}
-              {snapshot?.capped ? 'One strategy exceeded the indexed transfer cap; its history may be incomplete.' : ''}{' '}
-              Gross ASE is quote volume, not profit.{' '}
-              {tapes.data && tapes.data.length > 0 ? 'The Auras tape shows swaps from the last 600 blocks.' : ''}
-            </p>
+            <details className="soft-details">
+              <summary>How fills are indexed</summary>
+              <div className="soft-details-body">
+                Fills are read from the transfers of verified strategy contracts, resolved against the swap receipt of
+                the same transaction. Timestamps come from the receipt, so every row shows the real execution time.
+                {truncated ? ' Some fills predate the index window and show — instead of a time.' : ''}{' '}
+                {snapshot?.capped ? 'One strategy exceeded the indexed transfer cap; its history may be incomplete.' : ''}{' '}
+                Gross ASE is quote volume, not profit.{' '}
+                {tapes.data && tapes.data.length > 0 ? 'The Auras tape shows swaps from the last 600 blocks.' : ''}
+              </div>
+            </details>
           </div>
         </div>
       </section>

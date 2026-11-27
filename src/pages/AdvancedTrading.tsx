@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
+import { NETWORK } from '../lib/network';
 import {
   getCandles,
   getMarketPairs,
@@ -35,6 +36,8 @@ import { AURAS_AMM, ASEDEX_AMM, explorerTxUrl, getBalance, toHexAddress, viewCal
 import { fmtNum, fmtTimestamp, formatUnits, parseUnits, shortHash, weiToAse } from '../lib/format';
 import { perpsIntegration } from '../lib/perps';
 import { CandleChart } from '../components/CandleChart';
+import { PerpsTerminal } from '../components/PerpsTerminal';
+import { InfoTip } from '../components/InfoTip';
 
 const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 const SLIPPAGE_PRESETS = [10, 50, 100];
@@ -123,6 +126,24 @@ export function AdvancedTrading() {
   const wallet = useWallet();
   const client = useAsentum();
   const [params, setParams] = useSearchParams();
+  const initialPerps = params.get('venue') === 'perps' || Boolean(params.get('market'));
+  const [tradingVenue, setTradingVenue] = useState<'spot' | 'perps'>(initialPerps ? 'perps' : 'spot');
+
+  const switchTradingVenue = (nextVenue: 'spot' | 'perps', sideOverride?: 'LONG' | 'SHORT') => {
+    setTradingVenue(nextVenue);
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (nextVenue === 'perps') {
+        next.set('venue', 'perps');
+        if (sideOverride) next.set('side', sideOverride);
+      } else {
+        if (next.get('venue') === 'perps') next.delete('venue');
+        next.delete('market');
+        next.delete('side');
+      }
+      return next;
+    }, { replace: true });
+  };
 
   const pairsState = useAsync(() => getMarketPairs(), 60_000);
   const pairs = useMemo(() => {
@@ -204,6 +225,7 @@ export function AdvancedTrading() {
 
   const [side, setSide] = useState<'buy' | 'sell'>('buy');
   const [orderKind, setOrderKind] = useState<'market' | 'limit' | 'bot'>('market');
+  const [lowerTab, setLowerTab] = useState<'trades' | 'orders'>('trades');
   const [amount, setAmount] = useState('');
   const [slippageBps, setSlippageBps] = useState(50);
   const [quote, setQuote] = useState<RouteQuote | null>(null);
@@ -473,17 +495,20 @@ export function AdvancedTrading() {
     setParams(next, { replace: true });
   };
 
-  const setMax = () => {
-    // Leave a small ASE reserve so the swap can still pay for gas.
-    const usable = side === 'buy' && walletBalance > 50_000_000_000_000_000n
-      ? walletBalance - 50_000_000_000_000_000n
-      : walletBalance;
-    if (usable <= 0n) return;
+  const setPercent = (pct: number, forLimit = false) => {
+    const reserve = side === 'buy' && pct === 100 && walletBalance > 50_000_000_000_000_000n
+      ? 50_000_000_000_000_000n
+      : 0n;
+    const usable = walletBalance > reserve ? walletBalance - reserve : walletBalance;
+    const target = pct === 100 ? usable : (usable * BigInt(pct)) / 100n;
+    if (target <= 0n) return;
     const dec = side === 'buy' ? 18 : decimals;
     const scale = 10n ** BigInt(dec);
-    const whole = usable / scale;
-    const frac = (usable % scale).toString().padStart(dec, '0').slice(0, 8).replace(/0+$/, '');
-    setAmount(`${whole}${frac ? `.${frac}` : ''}`);
+    const whole = target / scale;
+    const frac = (target % scale).toString().padStart(dec, '0').slice(0, 8).replace(/0+$/, '');
+    const formatted = `${whole}${frac ? `.${frac}` : ''}`;
+    if (forLimit) setLimitAmount(formatted);
+    else setAmount(formatted);
   };
 
   const perps = perpsIntegration();
@@ -513,20 +538,37 @@ export function AdvancedTrading() {
     <>
       <section className="wrap detail-head advanced-head">
         <div>
-          <span className="label">Advanced Trading · Asentum testnet</span>
-          <h1 className="detail-title">Trade the live AMM.</h1>
-          <p className="section-note" style={{ maxWidth: 620, marginTop: 16 }}>
-            Indexed candles and on-chain execution. Market orders are routed to whichever pool on Auras or AseDex
-            pays the most.
+          <span className="label">Trading Terminal · {NETWORK.shortLabel}</span>
+          <h1 className="detail-title">{tradingVenue === 'perps' ? 'AsePad Perps.' : 'Spot AMM Terminal.'}</h1>
+          <p className="section-note" style={{ marginTop: 8 }}>
+            {tradingVenue === 'perps'
+              ? 'Leveraged Long / Short positions, Vault margin, and native Perp orders.'
+              : 'Live pool charts, best-route market swaps, and Auras v2 limit orders.'}
+            <InfoTip
+              label="Venue & execution details"
+              text={tradingVenue === 'perps'
+                ? 'Executes directly against live AsePad Perps contracts (perps.asepad.fun) using Vault collateral and TWAP oracle marks.'
+                : 'Market orders automatically route to whichever pool on Auras or AseDex pays the most. Escrowed limit orders are available on Auras v2 pools.'}
+            />
           </p>
         </div>
         <div className="advanced-head-actions">
+          <div className="seg-tabs" style={{ marginTop: 0 }} role="tablist" aria-label="Trading market type">
+            <button type="button" role="tab" aria-selected={tradingVenue === 'spot'} className={tradingVenue === 'spot' ? 'seg-tab active' : 'seg-tab'} onClick={() => switchTradingVenue('spot')}>Spot AMM</button>
+            <button type="button" role="tab" aria-selected={tradingVenue === 'perps'} className={tradingVenue === 'perps' ? 'seg-tab active' : 'seg-tab'} onClick={() => switchTradingVenue('perps')}>AsePad Perps</button>
+          </div>
           <Link className="btn btn-ghost btn-sm" to="/swap">Simple swap</Link>
-          <Link className="btn btn-primary btn-sm" to="/deploy">Automate this pair</Link>
+          <Link className="btn btn-primary btn-sm" to={tradingVenue === 'perps' ? '/deploy?venue=perps' : '/deploy'}>
+            {tradingVenue === 'perps' ? 'Automate Perps' : 'Automate pair'}
+          </Link>
         </div>
       </section>
 
       <section className="wrap advanced-page">
+        {tradingVenue === 'perps' ? (
+          <PerpsTerminal />
+        ) : (
+        <>
         <div className="advanced-toolbar">
           <div className="pair-select">
             <span className="label">Market</span>
@@ -601,6 +643,7 @@ export function AdvancedTrading() {
                 </div>
                 <span className="mono muted advanced-source">
                   {tf.seconds === 1800 ? '2×15m aggregated' : tf.seconds === 604800 ? '7×1d aggregated' : 'Auras indexer'}
+                  <InfoTip label="Chart controls" text="Candles reflect indexed AMM fills only (no fabricated candles). Scroll to zoom and drag to pan." />
                 </span>
               </div>
               <CandleChart
@@ -610,18 +653,45 @@ export function AdvancedTrading() {
                 loading={candles.loading}
                 error={candles.error}
               />
-              <p className="advanced-chart-note">Indexed fills only · scroll to zoom · drag to pan</p>
             </div>
 
-            <div className="advanced-lower-grid">
-              <div className="panel">
-                <div className="panel-head">
-                  <div>
-                    <span className="label">Market trades</span>
-                    <p className="muted">Latest indexed fills for this pool</p>
-                  </div>
-                  <button type="button" className="chip" onClick={() => trades.refresh()}>Refresh</button>
+            <div className="panel">
+              <div className="panel-head">
+                <div className="seg-tabs" style={{ marginTop: 0 }} role="tablist" aria-label="Market activity view">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={lowerTab === 'trades'}
+                    className={lowerTab === 'trades' ? 'seg-tab active' : 'seg-tab'}
+                    onClick={() => setLowerTab('trades')}
+                  >
+                    Market trades
+                    <span className="seg-tab-count">{(trades.data ?? []).length}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={lowerTab === 'orders'}
+                    className={lowerTab === 'orders' ? 'seg-tab active' : 'seg-tab'}
+                    onClick={() => setLowerTab('orders')}
+                  >
+                    Open limit orders
+                    <span className="seg-tab-count">{limitEnabled ? (poolOrders.data?.orders.length ?? 0) : 0}</span>
+                  </button>
                 </div>
+                <button
+                  type="button"
+                  className="chip"
+                  onClick={() => {
+                    if (lowerTab === 'trades') trades.refresh();
+                    else poolOrders.refresh();
+                  }}
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {lowerTab === 'trades' ? (
                 <div className="table-scroll advanced-trades">
                   <table className="leaderboard-table">
                     <thead>
@@ -653,48 +723,47 @@ export function AdvancedTrading() {
                     </p>
                   )}
                 </div>
-              </div>
-
-              <div className="panel">
-                <div className="panel-head">
-                  <div>
-                    <span className="label">Open AMM limit orders</span>
-                    <p className="muted">Escrowed orders on Auras v2 · executed against pool liquidity</p>
+              ) : (
+                <div>
+                  <div className="order-book">
+                    <div className="order-book-side">
+                      <span className="label">Open buys · paying ASE</span>
+                      {bids.slice(0, 8).map((order) => (
+                        <div className="order-book-row" key={order.id}>
+                          <span className="mono up">{priceFmt(orderPrice(order, decimals))}</span>
+                          <span className="mono">{weiToAse(order.amountIn, 2)} ASE</span>
+                        </div>
+                      ))}
+                      {!limitEnabled && <p className="muted advanced-empty">No limit-order module on this AMM.</p>}
+                      {limitEnabled && bids.length === 0 && <p className="muted advanced-empty">No open bids.</p>}
+                    </div>
+                    <div className="order-book-side">
+                      <span className="label">Open sells · {token?.symbol}</span>
+                      {asks.slice(0, 8).map((order) => (
+                        <div className="order-book-row" key={order.id}>
+                          <span className="mono down">{priceFmt(orderPrice(order, decimals))}</span>
+                          <span className="mono">{formatUnits(order.amountIn, decimals, 2)} {token?.symbol}</span>
+                        </div>
+                      ))}
+                      {!limitEnabled && <p className="muted advanced-empty">No limit-order module on this AMM.</p>}
+                      {limitEnabled && asks.length === 0 && <p className="muted advanced-empty">No open asks.</p>}
+                    </div>
                   </div>
+                  <p className="advanced-book-note">
+                    {!limitEnabled
+                      ? 'Swaps only on this pool (no limit-order module).'
+                      : poolOrders.data
+                        ? `${poolOrders.data.orders.length} open orders (first ${Math.min(100, poolOrders.data.total)} of ${poolOrders.data.total} ids${poolOrders.data.truncated ? ' · truncated' : ''}).`
+                        : 'Reading open orders…'}
+                    {limitEnabled && (
+                      <InfoTip
+                        label="How AMM limit orders fill"
+                        text="Escrowed orders on Auras v2 are evaluated against AMM pool liquidity—not a central limit order book. An order fills when the pool can clear its minimum output."
+                      />
+                    )}
+                  </p>
                 </div>
-                <div className="order-book">
-                  <div className="order-book-side">
-                    <span className="label">Open buys · paying ASE</span>
-                    {bids.slice(0, 6).map((order) => (
-                      <div className="order-book-row" key={order.id}>
-                        <span className="mono up">{priceFmt(orderPrice(order, decimals))}</span>
-                        <span className="mono">{weiToAse(order.amountIn, 2)} ASE</span>
-                      </div>
-                    ))}
-                    {!limitEnabled && <p className="muted advanced-empty">No limit-order module on this AMM.</p>}
-                    {limitEnabled && bids.length === 0 && <p className="muted advanced-empty">No open bids.</p>}
-                  </div>
-                  <div className="order-book-side">
-                    <span className="label">Open sells · {token?.symbol}</span>
-                    {asks.slice(0, 6).map((order) => (
-                      <div className="order-book-row" key={order.id}>
-                        <span className="mono down">{priceFmt(orderPrice(order, decimals))}</span>
-                        <span className="mono">{formatUnits(order.amountIn, decimals, 2)} {token?.symbol}</span>
-                      </div>
-                    ))}
-                    {!limitEnabled && <p className="muted advanced-empty">No limit-order module on this AMM.</p>}
-                    {limitEnabled && asks.length === 0 && <p className="muted advanced-empty">No open asks.</p>}
-                  </div>
-                </div>
-                <p className="advanced-book-note">
-                  {!limitEnabled
-                    ? 'This market supports AMM swaps only; limit orders exist only on Auras v2 pools.'
-                    : poolOrders.data
-                      ? `${poolOrders.data.orders.length} matching open orders in the first ${Math.min(100, poolOrders.data.total)} of ${poolOrders.data.total} on-chain ids${poolOrders.data.truncated ? ' · more exist than this page shows' : ''}.`
-                      : 'Reading open orders…'}
-                  {limitEnabled && ' There is no matching engine: each order fills only when the AMM can pay its minimum.'}
-                </p>
-              </div>
+              )}
             </div>
           </div>
 
@@ -726,19 +795,20 @@ export function AdvancedTrading() {
 
               {orderKind === 'bot' ? (
                 <div className="advanced-bot-panel">
-                  <span className="label">Automate {token?.symbol ?? 'this token'} / ASE</span>
-                  <p className="field-help">Choose a Spot strategy for this pool. It runs without leverage through Asentum Cron; the selected pool and venue will be carried into the bot builder.</p>
+                  <span className="label">
+                    Automate {token?.symbol ?? 'this token'} / ASE
+                    <InfoTip
+                      label="Spot strategy execution"
+                      text="Runs without leverage via Asentum Cron using pool price/TWAP checks. Execution interval is configured in the builder independently of your chart timeframe."
+                    />
+                  </span>
                   <div className="advanced-bot-quick">
                     {STRATEGY_PRESETS.map((preset) => (
                       <Link key={preset.template} to={botUrl(preset.template, preset.interval)} className="advanced-strategy-row">
-                        <span><strong>{preset.name}</strong><small>{preset.text}</small><small className="mono">Default execution: {preset.interval >= 3600 ? `${preset.interval / 3600}h` : `${preset.interval / 60}m`}</small></span>
+                        <span><strong>{preset.name}</strong><small>{preset.text}</small></span>
                         <span aria-hidden="true">→</span>
                       </Link>
                     ))}
-                  </div>
-                  <div className="advanced-bot-context">
-                    <strong>Chart: {tf.label}</strong>
-                    <span>Execution interval is configured separately in the bot builder. The on-chain strategy uses its own pool-price/TWAP checks; chart candles are for your analysis and are not sent to the contract.</span>
                   </div>
                   <Link className="btn btn-primary swap-action" to={botUrl('dca', 300)}>Create a 5-minute bot for this pair →</Link>
                 </div>
@@ -754,11 +824,17 @@ export function AdvancedTrading() {
                         inputMode="decimal"
                         placeholder="0.0"
                       />
-                      <button type="button" className="chip" onClick={setMax}>MAX</button>
                     </div>
                   </label>
+                  <div className="pct-row">
+                    {[25, 50, 75, 100].map((pct) => (
+                      <button key={pct} type="button" className="pct-btn" onClick={() => setPercent(pct, false)}>
+                        {pct === 100 ? 'MAX' : `${pct}%`}
+                      </button>
+                    ))}
+                  </div>
                   <p className="field-help mono">
-                    Balance {formatUnits(walletBalance, side === 'buy' ? 18 : decimals, 5)} {side === 'buy' ? 'ASE' : token?.symbol}
+                    Available: {formatUnits(walletBalance, side === 'buy' ? 18 : decimals, 5)} {side === 'buy' ? 'ASE' : token?.symbol}
                   </p>
 
                   <dl className="swap-details advanced-quote">
@@ -812,9 +888,6 @@ export function AdvancedTrading() {
                   {quoteError && <p className="swap-note down">Preview quote unavailable: {quoteError}. You can retry the on-chain quote by pressing the trade button.</p>}
                   {!pairState.data && <p className="field-help">{pairState.loading ? 'Loading the selected pool from Asentum…' : pairState.error || 'Waiting for the selected pool state.'}</p>}
                   {wallet.connected && amountIn > 0n && !quote && !quoting && !quoteError && <p className="field-help">Waiting for a live quote from the selected AMM contract. Trading stays disabled until a valid quote is available.</p>}
-                  <p className="field-help">
-                    Market orders are AMM swaps with an on-chain minimum-output guard. They are not limit orders.
-                  </p>
                 </>
               ) : (
                 <>
@@ -838,22 +911,15 @@ export function AdvancedTrading() {
                         inputMode="decimal"
                         placeholder="0.0"
                       />
-                      <button
-                        type="button"
-                        className="chip"
-                        onClick={() => {
-                          if (walletBalance <= 0n) return;
-                          const dec = side === 'buy' ? 18 : decimals;
-                          const scale = 10n ** BigInt(dec);
-                          const whole = walletBalance / scale;
-                          const frac = (walletBalance % scale).toString().padStart(dec, '0').slice(0, 8).replace(/0+$/, '');
-                          setLimitAmount(`${whole}${frac ? `.${frac}` : ''}`);
-                        }}
-                      >
-                        MAX
-                      </button>
                     </div>
                   </label>
+                  <div className="pct-row">
+                    {[25, 50, 75, 100].map((pct) => (
+                      <button key={pct} type="button" className="pct-btn" onClick={() => setPercent(pct, true)}>
+                        {pct === 100 ? 'MAX' : `${pct}%`}
+                      </button>
+                    ))}
+                  </div>
                   <label className="field">
                     <span>Expires</span>
                     <select className="input" value={limitTtl} onChange={(event) => setLimitTtl(Number(event.target.value))}>
@@ -895,10 +961,6 @@ export function AdvancedTrading() {
                   </button>
                   {limitError && <p className="swap-note down">{limitError}</p>}
                   {limitNotice && <p className="swap-note up">{limitNotice}</p>}
-                  <p className="field-help">
-                    The input is escrowed in the Auras contract. It fills automatically when the pool output clears
-                    your minimum, and expires at the selected time. Not a resting order in a matching book.
-                  </p>
                 </>
               )}
 
@@ -961,23 +1023,28 @@ export function AdvancedTrading() {
             <div className="panel advanced-perps">
               <div className="panel-head">
                 <div>
-                  <span className="label">Perps · separate derivatives market</span>
-                  <p className="muted">Long / short · leverage · margin · liquidation</p>
+                  <span className="label">AsePad Perps · live venue</span>
+                  <p className="muted">Long / short · leverage · margin</p>
                 </div>
-                <span className="status-badge off">Not connected</span>
+                <span className="status-badge live">Live</span>
               </div>
-              <p className="advanced-perps-copy">{perps.reason} Spot bots are not Perps: they trade the underlying AMM pool without leverage or short positions.</p>
-              <div className="advanced-perps-actions">
-                <button type="button" className="btn btn-ghost btn-sm" disabled title={perps.reason}>Long</button>
-                <button type="button" className="btn btn-ghost btn-sm" disabled title={perps.reason}>Short</button>
-              </div>
-              <p className="field-help">
-                Spot swaps are never shown as perp positions, leverage or liquidation. The adapter in
-                <code> src/lib/perps.ts</code> is ready for a published venue.
+              <p className="advanced-perps-copy">
+                {perps.reason}
+                <InfoTip
+                  label="About AsePad Perps"
+                  text="Spot bots run on AMMs without leverage; switch to AsePad Perps for Long/Short positions, Vault margin, or autonomous Perp bots on perps.asepad.fun."
+                />
               </p>
+              <div className="advanced-perps-actions">
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => switchTradingVenue('perps', 'LONG')}>Long ↑</button>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => switchTradingVenue('perps', 'SHORT')}>Short ↓</button>
+                <Link className="btn btn-ghost btn-sm" to="/deploy?venue=perps">Perp bots →</Link>
+              </div>
             </div>
           </aside>
         </div>
+        </>
+        )}
       </section>
     </>
   );

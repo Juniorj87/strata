@@ -1,10 +1,8 @@
+import { NETWORK } from './network';
 import { loadStrategy, type LiveStrategy } from './registry';
 import { toHexAddress, viewCall } from './rpc';
 
-export const MARKETPLACE_ADDRESS = String(
-  import.meta.env?.VITE_STRATA_MARKETPLACE ||
-  ''
-).trim();
+export const MARKETPLACE_ADDRESS = NETWORK.strataMarketplace;
 
 export interface MarketplaceListing {
   strategy: string;
@@ -32,7 +30,7 @@ function decodeListing(value: unknown): Omit<MarketplaceListing, 'liveStrategy'>
       if (rawConfig && typeof rawConfig === 'object' && !Array.isArray(rawConfig)) {
         const raw = rawConfig as Record<string, unknown>;
         const safe: Record<string, string> = {};
-        for (const key of ['version', 'template', 'poolId', 'token', 'thresholdBps', 'stepBps', 'intervalSec', 'sizeWei', 'budgetWei', 'decimals', 'notionalWei', 'slices', 'levels', 'costBasisAseWeiPerToken', 'dailyLossLimitAseWei', 'stopLossBps', 'takeProfitBps', 'maxDrawdownBps', 'targetUpsideBps', 'sizePerLevelWei', 'sellSizeWei', 'buySizeAseWei', 'buyBudgetAseWei']) {
+        for (const key of ['version', 'template', 'venue', 'poolId', 'marketId', 'token', 'side', 'leverage', 'marginWei', 'marginPerLegWei', 'totalMarginWei', 'triggerMoveBps', 'triggerDir', 'tpBps', 'slBps', 'cfg', 'thresholdBps', 'stepBps', 'intervalSec', 'sizeWei', 'budgetWei', 'decimals', 'notionalWei', 'slices', 'levels', 'costBasisAseWeiPerToken', 'dailyLossLimitAseWei', 'stopLossBps', 'takeProfitBps', 'maxDrawdownBps', 'targetUpsideBps', 'sizePerLevelWei', 'sellSizeWei', 'buySizeAseWei', 'buyBudgetAseWei']) {
           const value = raw[key];
           if (typeof value === 'string' || typeof value === 'number') safe[key] = String(value);
         }

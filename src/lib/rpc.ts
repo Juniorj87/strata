@@ -1,4 +1,5 @@
 import { ase1ToHex } from '@asentum/connect';
+import { CHAIN_ID, NETWORK, chainStorageKey, getActiveRpcUrl } from './network';
 
 /**
  * Asentum chain client - plain fetch, no SDK, no deps.
@@ -11,8 +12,9 @@ import { ase1ToHex } from '@asentum/connect';
  *   - "latest" is the finalized head; "tip" is the newest block
  */
 
-export const RPC_URL = 'https://testnet.asentum.com';
-export const EXPLORER_URL = 'https://explorer.asentum.com';
+export const RPC_URL = NETWORK.rpcUrl;
+export const EXPLORER_URL = NETWORK.explorerUrl;
+export { CHAIN_ID };
 
 /**
  * Base for explorer API calls.
@@ -26,7 +28,6 @@ function explorerApiBase(): string {
   if (typeof window === 'undefined' || !window.location?.origin) return `${EXPLORER_URL}/api`;
   return `${window.location.origin}/api/explorer`;
 }
-export const CHAIN_ID = 1423;
 
 /**
  * Auras AMM v2 (pool reads, quotes and swaps).
@@ -36,17 +37,17 @@ export const CHAIN_ID = 1423;
  * whatever LPs have not migrated yet, so it stays readable for old strategies,
  * but new pools, quotes and swaps must target v2.
  */
-export const AURAS_AMM = '0xcc1c9029cfe92004bca76c013cef2fdaa75351a2';
+export const AURAS_AMM = NETWORK.aurasAmm;
 /** Auras AMM v1 - legacy pools only. Do not point new strategies at it. */
-export const AURAS_AMM_V1 = '0x63f640a9b98b6f28e06cb5cc0fce5d72b6c0eabd';
+export const AURAS_AMM_V1 = NETWORK.aurasAmmV1;
 /** Every Auras AMM deployment, for event and transfer accounting. */
-export const AURAS_AMM_ALL = [AURAS_AMM, AURAS_AMM_V1] as const;
+export const AURAS_AMM_ALL = [AURAS_AMM, AURAS_AMM_V1].filter(Boolean) as readonly string[];
 /** Backward-compatible alias: AURAS always means the live AMM. */
 export const AURAS = AURAS_AMM;
 /** AseDex Exchange contract address. */
-export const ASEDEX_AMM = '0xc3833b73eb30242289e533b3e97c4b72b97e24e9';
+export const ASEDEX_AMM = NETWORK.asedexAmm;
 /** AURA token address. */
-export const AURA_TOKEN = '0xc24044dccea3ba8b362e1c85fa16ddc658022269';
+export const AURA_TOKEN = NETWORK.auraToken;
 
 /** EIP-7528 style sentinel for the native side of a pool. */
 export const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
@@ -55,10 +56,7 @@ export const NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 export const CRON_REGISTRY = '0x0000000000000000000000000000000000000006';
 
 /** Strata Hub - canonical protocol coordinator and registry. */
-export const STRATA_HUB = String(
-  import.meta.env?.VITE_STRATA_HUB ||
-  'ase1utdzul2gxdw4c60fr7fcphghlak63sjf8mqnut'
-).trim();
+export const STRATA_HUB = NETWORK.strataHub;
 
 export interface PoolInfo {
   id: string;
@@ -74,37 +72,47 @@ export interface PoolInfo {
   venue?: 'auras' | 'asedex';
 }
 
-const _symbolCache = new Map<string, string>([
-  ['0xc24044dccea3ba8b362e1c85fa16ddc658022269', 'AURA'],
-  ['0xbea7c12cba13eddd8e8ad77ff8f62fcf27736d20', 'NOVA'],
-  ['0x50cb8d861050ad0052959e0f942c5347842346f1', 'PULSE'],
-  ['0xde4480220ba5793bff42fd9162954fa3fdb1acd3', 'ZEPH'],
-  ['0xe91421ecfe12f18814dc8c0635267fb2dc86ac6f', 'ORB'],
-  ['0xd580adfb35a68844903493f0dfa38549a1c74055', 'E2E'],
-]);
+const _symbolCache = new Map<string, string>(
+  CHAIN_ID === 1423
+    ? [
+        ['0xc24044dccea3ba8b362e1c85fa16ddc658022269', 'AURA'],
+        ['0xbea7c12cba13eddd8e8ad77ff8f62fcf27736d20', 'NOVA'],
+        ['0x50cb8d861050ad0052959e0f942c5347842346f1', 'PULSE'],
+        ['0xde4480220ba5793bff42fd9162954fa3fdb1acd3', 'ZEPH'],
+        ['0xe91421ecfe12f18814dc8c0635267fb2dc86ac6f', 'ORB'],
+        ['0xd580adfb35a68844903493f0dfa38549a1c74055', 'E2E'],
+      ]
+    : [],
+);
 
-const _decimalsCache = new Map<string, number>([
-  ['0xc24044dccea3ba8b362e1c85fa16ddc658022269', 18],
-  ['0xbea7c12cba13eddd8e8ad77ff8f62fcf27736d20', 18],
-  ['0x50cb8d861050ad0052959e0f942c5347842346f1', 18],
-  ['0xde4480220ba5793bff42fd9162954fa3fdb1acd3', 18],
-  ['0xe91421ecfe12f18814dc8c0635267fb2dc86ac6f', 18],
-  ['0xd580adfb35a68844903493f0dfa38549a1c74055', 18],
-]);
+const _decimalsCache = new Map<string, number>(
+  CHAIN_ID === 1423
+    ? [
+        ['0xc24044dccea3ba8b362e1c85fa16ddc658022269', 18],
+        ['0xbea7c12cba13eddd8e8ad77ff8f62fcf27736d20', 18],
+        ['0x50cb8d861050ad0052959e0f942c5347842346f1', 18],
+        ['0xde4480220ba5793bff42fd9162954fa3fdb1acd3', 18],
+        ['0xe91421ecfe12f18814dc8c0635267fb2dc86ac6f', 18],
+        ['0xd580adfb35a68844903493f0dfa38549a1c74055', 18],
+      ]
+    : [],
+);
 
-// Last-resort values for the Auras v2 pools (read from AURAS_AMM).
-const SEED_AURAS_POOLS: PoolInfo[] = [
-  { id: '1', symbol: 'AURA', name: 'Aura', token: '0xc24044dccea3ba8b362e1c85fa16ddc658022269', decimals: 18, reserveToken: '39132791957176154358993', reserveNative: '108216002497810570773', feeBps: '30', venue: 'auras' },
-  { id: '2', symbol: 'NOVA', name: 'Nova', token: '0xbea7c12cba13eddd8e8ad77ff8f62fcf27736d20', decimals: 18, reserveToken: '1210114050382031660323', reserveNative: '5775879529390020532673', feeBps: '30', venue: 'auras' },
-  { id: '3', symbol: 'PULSE', name: 'Pulse', token: '0x50cb8d861050ad0052959e0f942c5347842346f1', decimals: 18, reserveToken: '319074120867226569623', reserveNative: '2474343214931471390883', feeBps: '30', venue: 'auras' },
-  { id: '4', symbol: 'ZEPH', name: 'Zephyr', token: '0xde4480220ba5793bff42fd9162954fa3fdb1acd3', decimals: 18, reserveToken: '501707569303402267825', reserveNative: '4134724708698214796095', feeBps: '30', venue: 'auras' },
-  { id: '5', symbol: 'ORB', name: 'Orbit', token: '0xe91421ecfe12f18814dc8c0635267fb2dc86ac6f', decimals: 18, reserveToken: '316080511452246493758', reserveNative: '993339130899583248733', feeBps: '30', venue: 'auras' },
-];
+// Last-resort values for the Auras v2 testnet pools (read from AURAS_AMM).
+const SEED_AURAS_POOLS: PoolInfo[] = CHAIN_ID === 1423
+  ? [
+      { id: '1', symbol: 'AURA', name: 'Aura', token: '0xc24044dccea3ba8b362e1c85fa16ddc658022269', decimals: 18, reserveToken: '39132791957176154358993', reserveNative: '108216002497810570773', feeBps: '30', venue: 'auras' },
+      { id: '2', symbol: 'NOVA', name: 'Nova', token: '0xbea7c12cba13eddd8e8ad77ff8f62fcf27736d20', decimals: 18, reserveToken: '1210114050382031660323', reserveNative: '5775879529390020532673', feeBps: '30', venue: 'auras' },
+      { id: '3', symbol: 'PULSE', name: 'Pulse', token: '0x50cb8d861050ad0052959e0f942c5347842346f1', decimals: 18, reserveToken: '319074120867226569623', reserveNative: '2474343214931471390883', feeBps: '30', venue: 'auras' },
+      { id: '4', symbol: 'ZEPH', name: 'Zephyr', token: '0xde4480220ba5793bff42fd9162954fa3fdb1acd3', decimals: 18, reserveToken: '501707569303402267825', reserveNative: '4134724708698214796095', feeBps: '30', venue: 'auras' },
+      { id: '5', symbol: 'ORB', name: 'Orbit', token: '0xe91421ecfe12f18814dc8c0635267fb2dc86ac6f', decimals: 18, reserveToken: '316080511452246493758', reserveNative: '993339130899583248733', feeBps: '30', venue: 'auras' },
+    ]
+  : [];
 
 let _poolsCache: PoolInfo[] | null = null;
 let _fetchingPoolsPromise: Promise<PoolInfo[]> | null = null;
 // v2 key: a list saved against the v1 AMM must not be painted after the move.
-const POOLS_LS_KEY = 'strata_pools_v2';
+const POOLS_LS_KEY = chainStorageKey('strata_pools_v2');
 
 type RawPool = {
   id: string;
@@ -520,11 +528,12 @@ export async function getContractSource(address: string): Promise<string> {
 
 export async function rpcCall<T = unknown>(method: string, params: unknown[]): Promise<T> {
   let res: Response | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 8000);
+    await nodeSlot();
     try {
-      res = await fetch(RPC_URL, {
+      res = await fetch(getActiveRpcUrl(), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
@@ -532,13 +541,13 @@ export async function rpcCall<T = unknown>(method: string, params: unknown[]): P
       });
       clearTimeout(timer);
       if (res.status === 429 || res.status >= 502) {
-        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        nodeCoolDown(nodeBackoff(res, attempt));
         continue;
       }
       break;
     } catch (e) {
       clearTimeout(timer);
-      if (attempt === 2) throw e;
+      if (attempt === 3) throw e;
       await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
     }
   }
@@ -561,7 +570,8 @@ export async function rpcBatch<T = unknown>(calls: { method: string; params: unk
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 8000);
-    const res = await fetch(RPC_URL, {
+    await nodeSlot();
+    const res = await fetch(getActiveRpcUrl(), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(
@@ -671,19 +681,28 @@ export async function getHeads(): Promise<Heads> {
 export async function getBalance(address: string): Promise<{ balance: string; nonce: string }> {
   let hexAddr = address;
   try { hexAddr = asHexAddress(address); } catch {}
-  try {
-    const res = await fetch(`${RPC_URL}/balance/${hexAddr}`);
-    if (res.ok) {
-      const text = await res.text();
-      try {
-        const json = JSON.parse(text);
-        return { balance: json.balance ?? '0', nonce: json.nonce ?? '0' };
-      } catch {
-        // non-json
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await nodeSlot();
+      const res = await fetch(`${getActiveRpcUrl()}/balance/${hexAddr}`);
+      if (res.status === 429 || res.status >= 502) {
+        nodeCoolDown(nodeBackoff(res, attempt));
+        continue;
       }
+      if (res.ok) {
+        const text = await res.text();
+        try {
+          const json = JSON.parse(text);
+          return { balance: json.balance ?? '0', nonce: json.nonce ?? '0' };
+        } catch {
+          // non-json
+        }
+      }
+      break;
+    } catch {
+      // fallback to eth_getBalance
+      break;
     }
-  } catch {
-    // fallback to eth_getBalance
   }
 
   try {
@@ -695,28 +714,44 @@ export async function getBalance(address: string): Promise<{ balance: string; no
 }
 
 /**
- * Small gate in front of /view: the public node rate-limits bursts (429), and
- * several pages read pools at once. Capping concurrent reads and caching
- * identical reads for a couple of seconds keeps the app under that limit.
+ * Shared pacing gate for every node read.
+ *
+ * The public testnet gateway rate-limits by request rate, not by concurrency:
+ * a page that loads markets, candles, balances and orders at once still gets a
+ * wall of 429s even with few sockets open. So calls leave one at a time,
+ * NODE_MIN_GAP_MS apart, and a 429 parks every caller until the node recovers
+ * instead of letting the rest of the burst hammer it too.
  */
 const VIEW_CACHE = new Map<string, { at: number; value: unknown }>();
 const VIEW_CACHE_MS = 800;
-const VIEW_MAX_CONCURRENT = 6;
-let viewActive = 0;
-const viewQueue: (() => void)[] = [];
+const NODE_MIN_GAP_MS = 70;
+const NODE_COOLDOWN_MAX_MS = 8_000;
+let nodeNextAt = 0;
+let nodeCoolDownUntil = 0;
+let nodeGate: Promise<void> = Promise.resolve();
 
-function acquireViewSlot(): Promise<void> {
-  if (viewActive < VIEW_MAX_CONCURRENT) {
-    viewActive += 1;
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => viewQueue.push(() => { viewActive += 1; resolve(); }));
+function nodeSlot(): Promise<void> {
+  const wait = nodeGate.then(async () => {
+    const now = Date.now();
+    const at = Math.max(now, nodeNextAt, nodeCoolDownUntil);
+    nodeNextAt = at + NODE_MIN_GAP_MS;
+    if (at > now) await new Promise((r) => setTimeout(r, at - now));
+  });
+  nodeGate = wait.then(() => undefined, () => undefined);
+  return wait;
 }
 
-function releaseViewSlot() {
-  viewActive = Math.max(0, viewActive - 1);
-  const next = viewQueue.shift();
-  if (next) next();
+/** Honour Retry-After when the node sends one, otherwise back off exponentially. */
+function nodeBackoff(res: Response | null, attempt: number): number {
+  const header = Number(res?.headers.get('retry-after'));
+  const ms = Number.isFinite(header) && header > 0
+    ? header * 1000
+    : 400 * 2 ** attempt + Math.floor(Math.random() * 200);
+  return Math.min(ms, NODE_COOLDOWN_MAX_MS);
+}
+
+function nodeCoolDown(ms: number) {
+  nodeCoolDownUntil = Math.max(nodeCoolDownUntil, Date.now() + ms);
 }
 
 /** POST /view - { contract, method, args }. Throws with the node's reason.
@@ -742,13 +777,13 @@ export async function viewCall<T = string>(
   if (hit && Date.now() - hit.at < VIEW_CACHE_MS) return hit.value as T;
 
   let lastMessage = '';
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     let res: Response;
-    await acquireViewSlot();
+    await nodeSlot();
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 8_000);
-      res = await fetch(`${RPC_URL}/view`, {
+      res = await fetch(`${getActiveRpcUrl()}/view`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ contract: hexContract, method, args }),
@@ -759,8 +794,6 @@ export async function viewCall<T = string>(
       lastMessage = err instanceof Error && err.name === 'AbortError' ? 'request timed out' : 'network failed';
       await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
       continue;
-    } finally {
-      releaseViewSlot();
     }
 
     const text = await res.text();
@@ -778,7 +811,7 @@ export async function viewCall<T = string>(
 
     if (res.status === 429) {
       lastMessage = 'the Asentum node is rate-limiting reads (429)';
-      await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+      nodeCoolDown(nodeBackoff(res, attempt));
       continue;
     }
     // The gateway sometimes answers HTTP 200 with an HTML error page while it
@@ -787,7 +820,8 @@ export async function viewCall<T = string>(
     lastMessage = res.status >= 500
       ? `the Asentum node is busy (${res.status})`
       : 'the Asentum node returned a busy non-JSON page';
-    await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+    if (res.status >= 500) nodeCoolDown(nodeBackoff(res, attempt));
+    else await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
   }
   throw new Error(`${method}: ${lastMessage || 'no response from the node'}`);
 }
@@ -800,11 +834,12 @@ export async function getAccountMeta(address: string): Promise<AccountMeta> {
     // leave as is
   }
   let res: Response | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      res = await fetch(`${RPC_URL}/asentum/account/${hexAddr}`);
+      await nodeSlot();
+      res = await fetch(`${getActiveRpcUrl()}/asentum/account/${hexAddr}`);
       if (res.status === 429 || res.status >= 502) {
-        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        nodeCoolDown(nodeBackoff(res, attempt));
         continue;
       }
       break;
@@ -897,7 +932,8 @@ export async function getLogs(address: string, fromBlock = 0, toBlock?: number):
 
 export async function getReceipt(txHash: string): Promise<Record<string, unknown> | null> {
   try {
-    const res = await fetch(`${RPC_URL}/receipts/${txHash}`);
+    await nodeSlot();
+    const res = await fetch(`${getActiveRpcUrl()}/receipts/${txHash}`);
     if (!res.ok) return null;
     const json = await res.json();
     if (json.error || json.reason) return null;

@@ -2,13 +2,18 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAsentum, useWallet } from '@asentum/connect';
 import { useAsync } from '../lib/hooks';
+import { IS_TESTNET, NETWORK } from '../lib/network';
+import { PERPS_APP_URL } from '../lib/perps';
 import { loadPools, loadAseDexPools } from '../lib/registry';
-import { BOT_TYPES, templateById } from '../lib/templates';
+import { BOT_TYPES, isPerpTemplate, templateById } from '../lib/templates';
 import { shortAddr, weiToAse } from '../lib/format';
-import { WalletPanel } from '../components/WalletPanel';
+import { PerpsBotBuilder } from '../components/PerpsBotBuilder';
+import { StrategyPreviewPanel } from '../components/StrategyPreviewPanel';
+import { InfoTip } from '../components/InfoTip';
 import {
   ASEDEX_AMM,
   AURAS_AMM,
+  explorerAddressUrl,
   explorerTxUrl,
   getAccountMeta,
   getContractSource,
@@ -143,10 +148,18 @@ function initArgsFor(
 export function Deploy() {
   const [params, setSearchParams] = useSearchParams();
   const initialTokenHandledRef = useRef(false);
+  const requestedTemplateParam = params.get('template');
+  const initialPerpsMode =
+    params.get('venue') === 'perps' ||
+    isPerpTemplate(requestedTemplateParam) ||
+    params.get('mode') === 'direct' ||
+    Boolean(params.get('market')) ||
+    Boolean(params.get('kind'));
+  const [builderVenue, setBuilderVenue] = useState<'spot' | 'perps'>(initialPerpsMode ? 'perps' : 'spot');
   // There is one builder now. Old links that still say ?mode=pro land on the
   // simple flow, and a pro-only template falls back to DCA instead of opening
   // a half-configured screen.
-  const requestedTemplate = templateById(params.get('template') || 'dca');
+  const requestedTemplate = templateById(requestedTemplateParam || 'dca');
   const initialTemplate = BOT_TYPES.some((bot) => bot.templateId === requestedTemplate.id)
     ? requestedTemplate
     : templateById('dca');
@@ -168,6 +181,7 @@ export function Deploy() {
   const [maxDrawdownBps] = useState(params.get('maxDrawdown') ?? '800');
   const [targetUpsideBps, setTargetUpsideBps] = useState(params.get('targetUpside') ?? '1000');
   const [sourceType, setSourceType] = useState<'strata' | 'asepad'>(params.get('venue') === 'asepad' ? 'asepad' : 'strata');
+  const [sideTab, setSideTab] = useState<'summary' | 'chart'>('summary');
   const [deploying, setDeploying] = useState(false);
   // A synchronous guard: React state updates arrive too late to stop the second
   // click of a double-click, which used to start two launches at once. Their
@@ -182,6 +196,7 @@ export function Deploy() {
   // effect on the bot itself, so the simple flow leaves it off by default.
   const [publishToHub, setPublishToHub] = useState(params.get('hub') === '1');
   const fromMarketplace = params.get('fromMarketplace') === '1';
+  const fromClone = params.get('cloned') === '1';
   const marketplaceBudgetHint = params.get('budgetHint') === 'suggested';
   const pools = useAsync(() => loadPools(), 20000);
   const asedexPools = useAsync(() => loadAseDexPools(), 20000);
@@ -871,6 +886,10 @@ export function Deploy() {
     if (template.id === 'risk-managed' && !costBasis.trim()) {
       setCostBasis(weiToAse(selectedPool.spot, 6));
     }
+    if (fromClone || fromMarketplace) {
+      autoSizedRef.current = key;
+      return;
+    }
     if (
       template.trades && template.id !== 'dca' &&
       currentTokenHolding && currentTokenHolding.balanceNum > 0 &&
@@ -1027,94 +1046,154 @@ export function Deploy() {
 
   return (
     <>
-      <section className="wrap detail-head">
-        <span className="label">Create a bot · Asentum testnet</span>
+      <section className="wrap detail-head" style={{ paddingTop: 28, paddingBottom: 16 }}>
+        <span className="label">Create a bot · {NETWORK.shortLabel}</span>
         <h1 className="detail-title">Launch a trading bot.</h1>
-        <p className="section-note" style={{ maxWidth: 640, marginTop: 18 }}>
-          Pick what the bot should do, choose the token and amount, then press launch. You only confirm a few wallet
-          prompts — no pasting, no config files — and you can close the bot and get your funds back at any time.
+        <p className="section-note" style={{ maxWidth: 720, marginTop: 10 }}>
+          Choose Spot AMMs (Auras / AseDex) or leveraged Perpetuals on{' '}
+          <span style={{ whiteSpace: 'nowrap' }}>
+            <a href={PERPS_APP_URL} target="_blank" rel="noreferrer" className="link-arrow">perps.asepad.fun ↗</a>.
+            <InfoTip
+              label="Self-custody and withdrawals"
+              text="Every bot deploys as an isolated contract you own—no server custody. You only confirm wallet prompts and can stop or withdraw at any time."
+            />
+          </span>
         </p>
+
+        <div className="deploy-venue-switch" role="tablist" aria-label="Trading venue category" style={{ marginTop: 18, marginBottom: 0 }}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={builderVenue === 'spot'}
+            className={builderVenue === 'spot' ? 'deploy-venue-card active' : 'deploy-venue-card'}
+            onClick={() => {
+              setBuilderVenue('spot');
+              setSearchParams((prev) => {
+                const next = new URLSearchParams(prev);
+                if (next.get('venue') === 'perps') next.delete('venue');
+                next.delete('mode');
+                next.delete('market');
+                next.delete('kind');
+                if (isPerpTemplate(next.get('template'))) next.set('template', 'dca');
+                return next;
+              }, { replace: true });
+            }}
+          >
+            <div className="deploy-venue-top">
+              <strong>Spot AMM Bots</strong>
+              <span className="badge">Auras · AseDex</span>
+            </div>
+            <small>DCA, Take-Profit, Grid, Stop-Loss &amp; TWAP · no leverage</small>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={builderVenue === 'perps'}
+            className={builderVenue === 'perps' ? 'deploy-venue-card active' : 'deploy-venue-card'}
+            onClick={() => {
+              setBuilderVenue('perps');
+              setSearchParams((prev) => {
+                const next = new URLSearchParams(prev);
+                next.set('venue', 'perps');
+                return next;
+              }, { replace: true });
+            }}
+          >
+            <div className="deploy-venue-top">
+              <strong>AsePad Perps Bots</strong>
+              <span className="perp-badge-live">LIVE · perps.asepad.fun</span>
+            </div>
+            <small>Long / Short Cron contracts or native TWAP, Scale &amp; Trailing orders</small>
+          </button>
+        </div>
+
         {fromMarketplace && (
           <div className="notice marketplace-copy-notice" style={{ marginTop: 18, maxWidth: 760 }}>
             <strong>Community settings loaded</strong>
             <span>These values were shared by another wallet. Review the pool, size, token budget and every risk rule before deploying. {marketplaceBudgetHint ? 'The original contract did not store its full funding budget, so the suggested amount is only a starting point.' : 'The strategy configuration is a starting point, not a performance guarantee.'}</span>
           </div>
         )}
+        {fromClone && !fromMarketplace && (
+          <div className="notice marketplace-copy-notice" style={{ marginTop: 18, maxWidth: 760 }}>
+            <strong>Cloned from an on-chain bot</strong>
+            <span>Parameters were loaded from the deployed contract&apos;s live configuration. Review the pool, allocation sizes and risk guards before launching.</span>
+          </div>
+        )}
       </section>
 
       <section className="wrap" style={{ paddingBottom: 90 }}>
+        {builderVenue === 'perps' ? (
+          <PerpsBotBuilder />
+        ) : (
         <div className="terminal-grid">
           {(
             <div className="terminal-card">
-              <div className="bot-flow" aria-hidden="true">
-                <span><b>1</b>What it does</span>
-                <span><b>2</b>Token &amp; amount</span>
-                <span><b>3</b>Launch</span>
-              </div>
-              <div className="bot-tabs" role="tablist" aria-label="Bot type">
+              <div className="builder-type-grid" role="tablist" aria-label="Bot type">
                 {BOT_TYPES.map((bot) => (
                   <button
                     key={bot.templateId}
                     type="button"
                     role="tab"
                     aria-selected={template.id === bot.templateId}
-                    className={template.id === bot.templateId ? 'bot-tab active' : 'bot-tab'}
+                    className={template.id === bot.templateId ? 'builder-type-card active' : 'builder-type-card'}
                     onClick={() => selectBotType(bot.templateId)}
                   >
-                    <span className="bot-tab-mark" aria-hidden="true">{bot.mark}</span>
-                    <strong>{bot.title}</strong>
+                    <div className="builder-type-card-top">
+                      <strong>{bot.title}</strong>
+                      <span className="builder-type-tag">{bot.mark}</span>
+                    </div>
                     <small>{bot.short}</small>
                   </button>
                 ))}
               </div>
 
               <div className="terminal-body">
-                <p className="bot-blurb">{activeBot.blurb}</p>
-
-                <div className="token-row">
-                  <div className="venue-pill-group" role="group" aria-label="Trading venue">
-                    <button type="button" className={sourceType === 'strata' ? 'venue-pill active' : 'venue-pill'} onClick={() => switchVenue('strata')}>Auras</button>
-                    <button type="button" className={sourceType === 'asepad' ? 'venue-pill active' : 'venue-pill'} onClick={() => switchVenue('asepad')}>AseDex</button>
+                <div className="builder-step">
+                  <div className="builder-step-head">
+                    <span className="builder-step-title">
+                      <span className="builder-step-num">1</span>
+                      Market &amp; Allocation
+                    </span>
+                    <span className="field-help">{activeBot.blurb}</span>
                   </div>
-                  <button type="button" className="token-select" onClick={() => setTokenModalOpen(true)} aria-haspopup="dialog">
-                    <span className="token-badge" aria-hidden="true">{sym.slice(0, 1)}</span>
-                    <span className="token-select-main">
-                      <strong>{sym}</strong>
-                      <small>{selectedPool ? `pool #${selectedPool.id} · ${sourceType === 'asepad' ? 'AseDex' : 'Auras'}` : 'no live pool'}</small>
-                    </span>
-                    <span className="token-price">{selectedPool ? `1 ${sym} = ${weiToAse(selectedPool.spot, 6)} ASE` : '—'}</span>
-                    <span className="token-chevron" aria-hidden="true">▾</span>
-                  </button>
-                </div>
 
-                {wallet.connected && template.trades && template.id !== 'dca' && (!currentTokenHolding || currentTokenHolding.balanceNum === 0) && (
-                  <div className="notice" style={{ borderLeftColor: 'var(--warn)' }}>
-                    <strong>You hold 0 {sym}</strong>
-                    <span>
-                      This bot sells tokens, so the contract needs {sym} in it. Change the token, or start a DCA bot that buys with ASE instead.
-                    </span>
-                    {tokensWithBalance.length > 0 && (
-                      <div className="chip-row" style={{ marginTop: 10 }}>
-                        {tokensWithBalance.map((holding) => (
-                          <button key={holding.token} type="button" className="chip-btn" onClick={() => selectTokenPool(holding)}>
-                            {holding.symbol} · {holding.balanceFmt}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <button
-                      type="button"
-                      className="chip-btn"
-                      style={{ marginTop: 10 }}
-                      onClick={() => selectBotType('dca')}
-                    >
-                      Use DCA with my ASE instead
+                  <div className="token-row">
+                    <div className="venue-pill-group" role="group" aria-label="Trading venue">
+                      <button type="button" className={sourceType === 'strata' ? 'venue-pill active' : 'venue-pill'} onClick={() => switchVenue('strata')}>Auras</button>
+                      <button type="button" className={sourceType === 'asepad' ? 'venue-pill active' : 'venue-pill'} onClick={() => switchVenue('asepad')}>AseDex</button>
+                    </div>
+                    <button type="button" className="token-select" onClick={() => setTokenModalOpen(true)} aria-haspopup="dialog">
+                      <span className="token-badge" aria-hidden="true">{sym.slice(0, 1)}</span>
+                      <span className="token-select-main">
+                        <strong>{sym}</strong>
+                        <small>{selectedPool ? `pool #${selectedPool.id} · ${sourceType === 'asepad' ? 'AseDex' : 'Auras'}` : 'no live pool'}</small>
+                      </span>
+                      <span className="token-price">{selectedPool ? `1 ${sym} = ${weiToAse(selectedPool.spot, 6)} ASE` : '—'}</span>
+                      <span className="token-chevron" aria-hidden="true">▾</span>
                     </button>
                   </div>
-                )}
 
-                {template.id === 'dca' && (
-                  <>
+                  {wallet.connected && template.trades && template.id !== 'dca' && (!currentTokenHolding || currentTokenHolding.balanceNum === 0) && (
+                    <div className="compact-alert">
+                      <div>
+                        <strong>0 {sym} in wallet.</strong>{' '}
+                        <span>Pick a token you hold or switch to DCA with ASE.</span>
+                      </div>
+                      <div className="chip-row" style={{ margin: 0 }}>
+                        {tokensWithBalance.slice(0, 3).map((holding) => (
+                          <button key={holding.token} type="button" className="chip-btn" onClick={() => selectTokenPool(holding)}>
+                            {holding.symbol}
+                          </button>
+                        ))}
+                        <button type="button" className="chip-btn" onClick={() => selectBotType('dca')}>
+                          Switch to DCA
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {template.id === 'dca' && (
                     <div className="amount-field">
                       <div className="amount-field-head">
                         <label htmlFor="dcaBudget">Total budget</label>
@@ -1131,29 +1210,9 @@ export function Deploy() {
                         <button type="button" className="pct-btn" onClick={() => applyAsePct(1)}>MAX</button>
                       </div>
                     </div>
+                  )}
 
-                    <div className="param-grid">
-                      <div className="field" style={{ marginTop: 0 }}>
-                        <label htmlFor="dcaBuySize">Spend per purchase · ASE</label>
-                        <input id="dcaBuySize" className="input" value={buySizeAse} onChange={(event) => setBuySizeAse(event.target.value)} inputMode="decimal" />
-                      </div>
-                      <div className="field" style={{ marginTop: 0 }}>
-                        <label htmlFor="dcaInterval">Buy every · seconds</label>
-                        <input id="dcaInterval" className="input" type="number" min={60} max={86400} value={interval} onChange={(event) => setInterval(Number(event.target.value))} />
-                      </div>
-                    </div>
-                    <div className="chip-row">
-                      {intervalChips.map((chip) => (
-                        <button key={chip.value} type="button" className={interval === chip.value ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(chip.value)}>
-                          {chip.label}
-                        </button>
-                      ))}
-                    </div>
-                  </>
-                )}
-
-                {template.id === 'limit-exit' && (
-                  <>
+                  {template.id === 'limit-exit' && (
                     <div className="amount-field">
                       <div className="amount-field-head">
                         <label htmlFor="limitSize">Amount to sell</label>
@@ -1170,125 +1229,172 @@ export function Deploy() {
                         <button type="button" className="pct-btn" onClick={() => applyTokenPct(1)}>MAX</button>
                       </div>
                     </div>
+                  )}
 
-                    <div className="chip-row">
-                      {[2, 5, 10, 20].map((pct) => (
-                        <button
-                          key={pct}
-                          type="button"
-                          className={targetUpsidePct === pct ? 'chip-btn active' : 'chip-btn'}
-                          onClick={() => setTargetUpsideBps(String(pct * 100))}
-                        >
-                          +{pct}%
-                        </button>
-                      ))}
+                  {template.id === 'grid' && (
+                    <div className="param-grid">
+                      <div className="amount-field">
+                        <div className="amount-field-head">
+                          <label htmlFor="gridBudget">Tokens to sell</label>
+                          <span className="field-help">Avail: {tokenBalance} {sym}</span>
+                        </div>
+                        <div className="amount-input">
+                          <input id="gridBudget" value={budget} onChange={(event) => setBudgetDerived(event.target.value)} inputMode="decimal" aria-label={`Amount of ${sym} for sell levels`} />
+                          <span className="amount-unit">{sym}</span>
+                        </div>
+                        <div className="pct-row">
+                          <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.25)}>25%</button>
+                          <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.5)}>50%</button>
+                          <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.75)}>75%</button>
+                          <button type="button" className="pct-btn" onClick={() => applyTokenPct(1)}>MAX</button>
+                        </div>
+                      </div>
+
+                      <div className="amount-field">
+                        <div className="amount-field-head">
+                          <label htmlFor="gridAse">ASE to buy with</label>
+                          <span className="field-help">Avail: {aseBalance} ASE</span>
+                        </div>
+                        <div className="amount-input">
+                          <input id="gridAse" value={buyBudgetAse} onChange={(event) => changeBuyBudget(event.target.value)} inputMode="decimal" aria-label="ASE reserve for buy levels" />
+                          <span className="amount-unit">ASE</span>
+                        </div>
+                        <div className="pct-row">
+                          <button type="button" className="pct-btn" onClick={() => applyAsePct(0.25)}>25%</button>
+                          <button type="button" className="pct-btn" onClick={() => applyAsePct(0.5)}>50%</button>
+                          <button type="button" className="pct-btn" onClick={() => applyAsePct(0.75)}>75%</button>
+                          <button type="button" className="pct-btn" onClick={() => applyAsePct(1)}>MAX</button>
+                        </div>
+                      </div>
                     </div>
+                  )}
 
+                  {template.id === 'risk-managed' && (
+                    <div className="amount-field">
+                      <div className="amount-field-head">
+                        <label htmlFor="riskAllocation">Total token allocation</label>
+                        <span className="field-help">Available: {tokenBalance} {sym}</span>
+                      </div>
+                      <div className="amount-input">
+                        <input id="riskAllocation" value={budget} onChange={(event) => setBudgetDerived(event.target.value)} inputMode="decimal" aria-label={`Total allocation of ${sym}`} />
+                        <span className="amount-unit">{sym}</span>
+                      </div>
+                      <div className="pct-row">
+                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.25)}>25%</button>
+                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.5)}>50%</button>
+                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.75)}>75%</button>
+                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(1)}>MAX</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {template.id === 'twap' && (
+                    <div className="amount-field">
+                      <div className="amount-field-head">
+                        <label htmlFor="twapBudget">Amount to sell</label>
+                        <span className="field-help">Available: {tokenBalance} {sym}</span>
+                      </div>
+                      <div className="amount-input">
+                        <input id="twapBudget" value={budget} onChange={(event) => setBudgetDerived(event.target.value)} inputMode="decimal" aria-label={`Amount of ${sym} to sell`} />
+                        <span className="amount-unit">{sym}</span>
+                      </div>
+                      <div className="pct-row">
+                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.25)}>25%</button>
+                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.5)}>50%</button>
+                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.75)}>75%</button>
+                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(1)}>MAX</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="builder-step">
+                  <div className="builder-step-head">
+                    <span className="builder-step-title">
+                      <span className="builder-step-num">2</span>
+                      Strategy Rules
+                    </span>
+                  </div>
+
+                  {template.id === 'dca' && (
+                    <>
+                      <div className="param-grid">
+                        <div className="field" style={{ marginTop: 0 }}>
+                          <label htmlFor="dcaBuySize">Spend per purchase · ASE</label>
+                          <input id="dcaBuySize" className="input" value={buySizeAse} onChange={(event) => setBuySizeAse(event.target.value)} inputMode="decimal" />
+                        </div>
+                        <div className="field" style={{ marginTop: 0 }}>
+                          <label>Buy frequency</label>
+                          <div className="chip-row">
+                            {intervalChips.map((chip) => (
+                              <button key={chip.value} type="button" className={interval === chip.value ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(chip.value)}>
+                                {chip.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {template.id === 'limit-exit' && (
                     <div className="param-grid">
                       <div className="field" style={{ marginTop: 0 }}>
-                        <label htmlFor="limitTarget">Target rise · %</label>
-                        <input
-                          id="limitTarget"
-                          className="input"
-                          value={targetUpsidePct}
-                          onChange={(event) => setTargetUpsideBps(String(Math.round((Number(event.target.value) || 0) * 100)))}
-                          inputMode="decimal"
-                        />
+                        <label>Target rise</label>
+                        <div className="chip-row">
+                          {[2, 5, 10, 20].map((pct) => (
+                            <button
+                              key={pct}
+                              type="button"
+                              className={targetUpsidePct === pct ? 'chip-btn active' : 'chip-btn'}
+                              onClick={() => setTargetUpsideBps(String(pct * 100))}
+                            >
+                              +{pct}%
+                            </button>
+                          ))}
+                        </div>
                       </div>
                       <div className="field" style={{ marginTop: 0 }}>
-                        <label>Target price & payout</label>
-                        <div className="mono" style={{ fontSize: 16, paddingTop: 6 }}>{amt(targetPrice, 6)} ASE</div>
-                        <small className="muted mono" style={{ fontSize: 13, display: 'block', marginTop: 4 }}>
-                          You receive: <strong style={{ color: 'var(--accent)' }}>~{amt(estAseOut, 4)} ASE</strong>
+                        <label>Target price &amp; payout</label>
+                        <div className="mono" style={{ fontSize: 16, paddingTop: 4 }}>{amt(targetPrice, 6)} ASE</div>
+                        <small className="muted mono" style={{ fontSize: 13.5, display: 'block', marginTop: 4 }}>
+                          Est. payout: <strong style={{ color: 'var(--accent)' }}>~{amt(estAseOut, 4)} ASE</strong>
                         </small>
                       </div>
                     </div>
-                  </>
-                )}
+                  )}
 
-                {template.id === 'grid' && (
-                  <>
-                    <div className="amount-field">
-                      <div className="amount-field-head">
-                        <label htmlFor="gridBudget">Tokens to sell</label>
-                        <span className="field-help">Available: {tokenBalance} {sym}</span>
-                      </div>
-                      <div className="amount-input">
-                        <input id="gridBudget" value={budget} onChange={(event) => setBudgetDerived(event.target.value)} inputMode="decimal" aria-label={`Amount of ${sym} for sell levels`} />
-                        <span className="amount-unit">{sym}</span>
-                      </div>
-                      <div className="pct-row">
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.25)}>25%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.5)}>50%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.75)}>75%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(1)}>MAX</button>
-                      </div>
-                    </div>
-
-                    <div className="amount-field">
-                      <div className="amount-field-head">
-                        <label htmlFor="gridAse">ASE to buy with</label>
-                        <span className="field-help">Available: {aseBalance} ASE</span>
-                      </div>
-                      <div className="amount-input">
-                        <input id="gridAse" value={buyBudgetAse} onChange={(event) => changeBuyBudget(event.target.value)} inputMode="decimal" aria-label="ASE reserve for buy levels" />
-                        <span className="amount-unit">ASE</span>
-                      </div>
-                      <div className="pct-row">
-                        <button type="button" className="pct-btn" onClick={() => applyAsePct(0.25)}>25%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyAsePct(0.5)}>50%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyAsePct(0.75)}>75%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyAsePct(1)}>MAX</button>
-                      </div>
-                    </div>
-
-                    <div className="param-grid">
-                      <div className="field" style={{ marginTop: 0 }}>
-                        <label>Step between levels</label>
-                        <div className="chip-row">
-                          {[100, 200, 500].map((bps) => (
-                            <button key={bps} type="button" className={Number(threshold) === bps ? 'chip-btn active' : 'chip-btn'} onClick={() => setThreshold(String(bps))}>
-                              {bps / 100}%
-                            </button>
-                          ))}
+                  {template.id === 'grid' && (
+                    <>
+                      <div className="param-grid">
+                        <div className="field" style={{ marginTop: 0 }}>
+                          <label>Step between levels</label>
+                          <div className="chip-row">
+                            {[100, 200, 500].map((bps) => (
+                              <button key={bps} type="button" className={Number(threshold) === bps ? 'chip-btn active' : 'chip-btn'} onClick={() => setThreshold(String(bps))}>
+                                {bps / 100}%
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="field" style={{ marginTop: 0 }}>
+                          <label>Number of levels</label>
+                          <div className="chip-row">
+                            {[3, 5, 10].map((count) => (
+                              <button key={count} type="button" className={levelCount === count ? 'chip-btn active' : 'chip-btn'} onClick={() => changeLevels(String(count))}>
+                                {count}
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       </div>
-                      <div className="field" style={{ marginTop: 0 }}>
-                        <label>Number of levels</label>
-                        <div className="chip-row">
-                          {[3, 5, 10].map((count) => (
-                            <button key={count} type="button" className={levelCount === count ? 'chip-btn active' : 'chip-btn'} onClick={() => changeLevels(String(count))}>
-                              {count}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                    <p className="field-help">
-                      Each level sells {size || '0'} {sym} and buys with {buySizeAse || '0'} ASE. The grid runs until every level has executed.
-                    </p>
-                  </>
-                )}
+                      <p className="field-help">
+                        Per level: sell {size || '0'} {sym} / buy with {buySizeAse || '0'} ASE.
+                      </p>
+                    </>
+                  )}
 
-                {template.id === 'risk-managed' && (
-                  <>
-                    <div className="amount-field">
-                      <div className="amount-field-head">
-                        <label htmlFor="riskSize">Sell per run</label>
-                        <span className="field-help">Available: {tokenBalance} {sym}</span>
-                      </div>
-                      <div className="amount-input">
-                        <input id="riskSize" value={size} onChange={(event) => setSize(event.target.value)} inputMode="decimal" aria-label={`Amount of ${sym} per exit`} />
-                        <span className="amount-unit">{sym}</span>
-                      </div>
-                      <div className="pct-row">
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.25)}>25%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.5)}>50%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.75)}>75%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(1)}>MAX</button>
-                      </div>
-                    </div>
-
+                  {template.id === 'risk-managed' && (
                     <div className="param-grid">
                       <div className="field" style={{ marginTop: 0 }}>
                         <label>Stop-loss</label>
@@ -1311,109 +1417,128 @@ export function Deploy() {
                         </div>
                       </div>
                     </div>
+                  )}
 
-                    <div className="param-grid">
-                      <div className="field" style={{ marginTop: 0 }}>
-                        <label htmlFor="riskAllocation">Total allocation · {sym}</label>
-                        <input id="riskAllocation" className="input" value={budget} onChange={(event) => setBudgetDerived(event.target.value)} inputMode="decimal" />
+                  {template.id === 'twap' && (
+                    <>
+                      <div className="param-grid">
+                        <div className="field" style={{ marginTop: 0 }}>
+                          <label>Number of orders</label>
+                          <div className="chip-row">
+                            {[5, 10, 20].map((count) => (
+                              <button key={count} type="button" className={sliceCount === count ? 'chip-btn active' : 'chip-btn'} onClick={() => changeSlices(count)}>
+                                {count}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="field" style={{ marginTop: 0 }}>
+                          <label>Each order</label>
+                          <div className="mono" style={{ fontSize: 17, paddingTop: 8 }}>{size || '0'} {sym}</div>
+                        </div>
                       </div>
-                      <div className="field" style={{ marginTop: 0 }}>
-                        <label htmlFor="riskCostBasis">Average buy price · ASE</label>
-                        <input id="riskCostBasis" className="input" value={costBasis} onChange={(event) => setCostBasis(event.target.value)} placeholder="e.g. 0.302" inputMode="decimal" />
-                      </div>
-                    </div>
+                      <p className="field-help">Executes 1 order every {intervalLabel(interval)} (~{intervalLabel(sliceCount * interval)} total).</p>
+                    </>
+                  )}
+                </div>
 
-                    <div className="param-grid">
+                <details className="soft-details">
+                  <summary>Advanced settings &amp; schedule options</summary>
+                  <div className="soft-details-body" style={{ display: 'grid', gap: 16 }}>
+                    {template.id === 'dca' && (
                       <div className="field" style={{ marginTop: 0 }}>
-                        <label htmlFor="riskDailyLoss">Daily loss cap · ASE</label>
-                        <input id="riskDailyLoss" className="input" value={dailyLossLimit} onChange={(event) => setDailyLossLimit(event.target.value)} inputMode="decimal" />
+                        <label htmlFor="dcaInterval">Custom interval · seconds (min 60)</label>
+                        <input id="dcaInterval" className="input" type="number" min={60} max={86400} value={interval} onChange={(event) => setInterval(Number(event.target.value))} />
                       </div>
+                    )}
+
+                    {template.id === 'limit-exit' && (
                       <div className="field" style={{ marginTop: 0 }}>
-                        <label>Check every</label>
+                        <label htmlFor="limitTarget">Custom target rise · %</label>
+                        <input
+                          id="limitTarget"
+                          className="input"
+                          value={targetUpsidePct}
+                          onChange={(event) => setTargetUpsideBps(String(Math.round((Number(event.target.value) || 0) * 100)))}
+                          inputMode="decimal"
+                        />
+                      </div>
+                    )}
+
+                    {template.id === 'risk-managed' && (
+                      <>
+                        <div className="param-grid">
+                          <div className="field" style={{ marginTop: 0 }}>
+                            <label htmlFor="riskSize">Sell per run · {sym}</label>
+                            <input id="riskSize" className="input" value={size} onChange={(event) => setSize(event.target.value)} inputMode="decimal" />
+                          </div>
+                          <div className="field" style={{ marginTop: 0 }}>
+                            <label htmlFor="riskCostBasis">Average buy price · ASE</label>
+                            <input id="riskCostBasis" className="input" value={costBasis} onChange={(event) => setCostBasis(event.target.value)} placeholder="e.g. 0.302" inputMode="decimal" />
+                          </div>
+                        </div>
+                        <div className="param-grid">
+                          <div className="field" style={{ marginTop: 0 }}>
+                            <label htmlFor="riskDailyLoss">Daily loss cap · ASE</label>
+                            <input id="riskDailyLoss" className="input" value={dailyLossLimit} onChange={(event) => setDailyLossLimit(event.target.value)} inputMode="decimal" />
+                          </div>
+                          <div className="field" style={{ marginTop: 0 }}>
+                            <label>Check frequency</label>
+                            <div className="chip-row">
+                              {riskIntervalChips.map((chip) => (
+                                <button key={chip.value} type="button" className={interval === chip.value ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(chip.value)}>
+                                  {chip.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                    {template.id === 'twap' && (
+                      <div className="field" style={{ marginTop: 0 }}>
+                        <label>Slice interval</label>
                         <div className="chip-row">
-                          {riskIntervalChips.map((chip) => (
+                          {intervalChips.map((chip) => (
                             <button key={chip.value} type="button" className={interval === chip.value ? 'chip-btn active' : 'chip-btn'} onClick={() => setInterval(chip.value)}>
                               {chip.label}
                             </button>
                           ))}
                         </div>
                       </div>
-                    </div>
-                  </>
-                )}
+                    )}
 
-                {template.id === 'twap' && (
-                  <>
-                    <div className="amount-field">
-                      <div className="amount-field-head">
-                        <label htmlFor="twapBudget">Amount to sell</label>
-                        <span className="field-help">Available: {tokenBalance} {sym}</span>
-                      </div>
-                      <div className="amount-input">
-                        <input id="twapBudget" value={budget} onChange={(event) => setBudgetDerived(event.target.value)} inputMode="decimal" aria-label={`Amount of ${sym} to sell`} />
-                        <span className="amount-unit">{sym}</span>
-                      </div>
-                      <div className="pct-row">
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.25)}>25%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.5)}>50%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(0.75)}>75%</button>
-                        <button type="button" className="pct-btn" onClick={() => applyTokenPct(1)}>MAX</button>
-                      </div>
-                    </div>
-
-                    <div className="param-grid">
-                      <div className="field" style={{ marginTop: 0 }}>
-                        <label>Number of orders</label>
-                        <div className="chip-row">
-                          {[5, 10, 20].map((count) => (
-                            <button key={count} type="button" className={sliceCount === count ? 'chip-btn active' : 'chip-btn'} onClick={() => changeSlices(count)}>
-                              {count}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="field" style={{ marginTop: 0 }}>
-                        <label>Each order</label>
-                        <div className="mono" style={{ fontSize: 16, paddingTop: 9 }}>{size || '0'} {sym}</div>
-                      </div>
-                    </div>
-                    <p className="field-help">One order every {intervalLabel(interval)}, so {sliceCount} orders take about {intervalLabel(sliceCount * interval)}.</p>
-                  </>
-                )}
+                    <label className="hub-toggle" style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 13.5, color: 'var(--text-2)', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={publishToHub}
+                        onChange={(event) => setPublishToHub(event.target.checked)}
+                        style={{ accentColor: 'var(--accent)' }}
+                      />
+                      <span>
+                        Show this bot on the public leaderboard <span className="muted">(adds one wallet approval)</span>
+                      </span>
+                    </label>
+                  </div>
+                </details>
 
                 <div className="terminal-note">
-                  <span>Network fee (held in escrow, returned when stopped)</span>
+                  <span>Cron gas escrow (unused ASE returned on stop)</span>
                   <strong className="mono">~{escrow} ASE</strong>
                 </div>
 
                 {isWalletLocked && (
-                  <div className="notice" style={{ borderColor: 'var(--warn)', background: 'var(--warn-soft)', marginBottom: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={{ fontSize: 20 }}>🔒</span>
-                      <div>
-                        <strong style={{ color: 'var(--warn)' }}>Asentum Wallet extension is locked</strong>
-                        <p style={{ margin: '3px 0 0', fontSize: 13, color: 'var(--muted)' }}>
-                          Click the <strong>Asentum icon</strong> in your browser toolbar (top right), enter your password to unlock it, and return here to launch.
-                        </p>
-                      </div>
+                  <div className="compact-alert">
+                    <div>
+                      <strong>Asentum Wallet is locked.</strong>{' '}
+                      <span>Unlock the browser extension to launch.</span>
                     </div>
                   </div>
                 )}
 
-                <label className="hub-toggle" style={{ display: 'flex', gap: 9, alignItems: 'flex-start', margin: '2px 0 12px', fontSize: 12.5, lineHeight: 1.5, color: 'var(--muted)', cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={publishToHub}
-                    onChange={(event) => setPublishToHub(event.target.checked)}
-                    style={{ marginTop: 2, accentColor: 'var(--accent)' }}
-                  />
-                  <span>
-                    Show this bot on the public leaderboard
-                    <span className="dim"> · optional, adds one wallet approval</span>
-                  </span>
-                </label>
                 <button className="btn btn-primary launch-btn" type="button" onClick={deployLite} disabled={launchDisabled || isWalletLocked}>
-                  {deploying ? 'Deploying & Initializing…' : !wallet.connected ? 'Connect wallet to launch' : isWalletLocked ? '🔒 Unlock wallet in browser to launch' : `Launch ${activeBot.title} bot`}
+                  {deploying ? 'Deploying & Initializing…' : !wallet.connected ? 'Connect wallet to launch' : isWalletLocked ? 'Unlock wallet to launch' : `Launch ${activeBot.title} bot`}
                 </button>
                 {stage && <div className="deploy-stage" role="status">{stage}</div>}
                 {error && <div className="notice deploy-error" role="alert">{error}</div>}
@@ -1421,8 +1546,8 @@ export function Deploy() {
                 {resultAddress && (
                   <div className="deploy-result">
                     <div className="live-dot">Contract deployed</div>
-                    <a className="mono" href={`https://explorer.asentum.com/address/${displayAseAddress(resultAddress)}`} target="_blank" rel="noreferrer">{displayAseAddress(resultAddress)}</a>
-                    <div className="muted">{registrationOk ? 'Published to the leaderboard.' : publishToHub ? 'Check the leaderboard warning above.' : 'Saved in your Portfolio.'} Review the transaction receipts in the explorer.</div>
+                    <a className="mono" href={explorerAddressUrl(resultAddress)} target="_blank" rel="noreferrer">{displayAseAddress(resultAddress)}</a>
+                    <div className="muted">{registrationOk ? 'Published to the leaderboard.' : publishToHub ? 'Check the leaderboard warning above.' : 'Saved in your Portfolio.'}</div>
                   </div>
                 )}
               </div>
@@ -1430,39 +1555,90 @@ export function Deploy() {
           )}
 
           <aside className="terminal-side">
-            <WalletPanel compact />
+            <div className="seg-tabs" style={{ marginTop: 0, width: '100%' }} role="tablist" aria-label="Strategy preview mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'summary'}
+                className={sideTab === 'summary' ? 'seg-tab active' : 'seg-tab'}
+                style={{ flex: 1, justifyContent: 'center' }}
+                onClick={() => setSideTab('summary')}
+              >
+                Order Summary
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'chart'}
+                className={sideTab === 'chart' ? 'seg-tab active' : 'seg-tab'}
+                style={{ flex: 1, justifyContent: 'center' }}
+                onClick={() => setSideTab('chart')}
+              >
+                7D Chart &amp; Replay
+              </button>
+            </div>
 
-            <div className="panel preview-card">
-              <div className="panel-head">
-                <span className="label">What the bot will do</span>
-                <span className="pill pill-live">{activeBot.title}</span>
-              </div>
-              <div className="panel-body">
-                <p className="preview-lead">{previewLead}</p>
-                {previewFacts.map((fact) => (
-                  <div className="preview-fact" key={fact.label}>
-                    <span>{fact.label}</span>
-                    <strong>{fact.value}</strong>
+            {sideTab === 'summary' ? (
+              <div className="panel preview-card">
+                <div className="panel-head">
+                  <span className="label">What the bot will do</span>
+                  <span className="pill pill-live">{activeBot.title}</span>
+                </div>
+                <div className="panel-body">
+                  <p className="preview-lead">{previewLead}</p>
+                  {previewFacts.map((fact) => (
+                    <div className="preview-fact" key={fact.label}>
+                      <span>{fact.label}</span>
+                      <strong>{fact.value}</strong>
+                    </div>
+                  ))}
+                  <div className="preview-fact">
+                    <span>
+                      Network fee
+                      <InfoTip
+                        label="Cron gas escrow"
+                        text="Held in on-chain Cron escrow to pay scheduled executions. Unused ASE returns to your contract when you stop the bot and can be withdrawn."
+                      />
+                    </span>
+                    <strong>{escrow} ASE</strong>
                   </div>
-                ))}
-                <div className="preview-fact"><span>Network fee</span><strong>{escrow} ASE</strong></div>
-                <div className="safety-line">
-                  <span className="safety-icon" aria-hidden="true">✓</span>
-                  <span>100% on-chain smart contract. Stop it or withdraw your funds whenever you want — no server and no custodian.</span>
+                  <div className="safety-line">
+                    <span className="safety-icon" aria-hidden="true">✓</span>
+                    <span>100% on-chain contract you own. Stop or withdraw anytime.</span>
+                  </div>
+                  <details className="soft-details" style={{ marginTop: 6 }}>
+                    <summary>Execution &amp; safety notes</summary>
+                    <div className="soft-details-body">
+                      <p style={{ margin: 0 }}>
+                        {IS_TESTNET ? 'Experimental testnet software' : 'Non-custodial on-chain software'}, not investment advice. Stopping the cron job returns unused escrow to the contract so ASE and tokens can be withdrawn.
+                      </p>
+                      <Link className="link-arrow" to="/how" style={{ display: 'inline-flex', marginTop: 10 }}>How it works →</Link>
+                    </div>
+                  </details>
                 </div>
               </div>
-            </div>
-
-            <div className="panel">
-              <div className="panel-body">
-                <p className="muted" style={{ fontSize: 12.5 }}>
-                  Experimental testnet software, not investment advice. The owner can stop the cron job from the bot page; unused escrow returns to the contract, then ASE and unused tokens can be withdrawn. Confirm the pair, amount and source hash before signing.
-                </p>
-                <Link className="btn btn-ghost" to="/how" style={{ width: '100%', justifyContent: 'center', marginTop: 14 }}>How it works →</Link>
-              </div>
-            </div>
+            ) : (
+              <StrategyPreviewPanel
+                mode="spot"
+                pool={selectedPool}
+                params={{
+                  templateId: template.id,
+                  spotPrice: spotAse,
+                  thresholdBps: Number(threshold) || 0,
+                  levels: levelCount,
+                  slices: sliceCount,
+                  intervalSec: interval,
+                  stopLossBps: Number(stopLossBps) || 0,
+                  takeProfitBps: Number(takeProfitBps) || 0,
+                  targetUpsideBps: Number(targetUpsideBps) || 0,
+                  costBasis: Number(costBasis) || 0,
+                  feeBps: Number(selectedPool?.feeBps ?? 30) || 30,
+                }}
+              />
+            )}
           </aside>
         </div>
+        )}
       </section>
 
       {tokenModalOpen && (
