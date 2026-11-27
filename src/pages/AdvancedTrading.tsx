@@ -148,11 +148,64 @@ export function AdvancedTrading() {
     }, { replace: true });
   };
 
+  const [pairOpen, setPairOpen] = useState(false);
+  const [pairQuery, setPairQuery] = useState('');
+  const [pairDexFilter, setPairDexFilter] = useState<'all' | 'auras' | 'asedex'>('all');
+  const pairPickerRef = useRef<HTMLDivElement | null>(null);
+  const pairSearchRef = useRef<HTMLInputElement | null>(null);
+
   const pairsState = useAsync(() => getMarketPairs(), 60_000);
   const pairs = useMemo(() => {
     const supported = new Set([AURAS_AMM.toLowerCase(), ASEDEX_AMM.toLowerCase()]);
     return tradablePairs(pairsState.data ?? []).filter((item) => supported.has(item.amm.toLowerCase()));
   }, [pairsState.data]);
+
+  const aurasCount = useMemo(
+    () => pairs.filter((item) => item.dex !== 'asedex').length,
+    [pairs],
+  );
+  const asedexCount = useMemo(
+    () => pairs.filter((item) => item.dex === 'asedex').length,
+    [pairs],
+  );
+
+  const filteredPairs = useMemo(() => {
+    const q = pairQuery.trim().toLowerCase();
+    return pairs.filter((item) => {
+      const dexKind = item.dex === 'asedex' ? 'asedex' : 'auras';
+      if (pairDexFilter !== 'all' && dexKind !== pairDexFilter) return false;
+      if (!q) return true;
+      const view = marketFor(item);
+      const sym = (view?.symbol ?? item.base).toLowerCase();
+      const dexLabel = item.dex === 'asedex' ? 'asedex' : `auras v${item.version ?? 2}`;
+      return (
+        sym.includes(q) ||
+        `${sym}/ase`.includes(q) ||
+        item.base.toLowerCase().includes(q) ||
+        dexLabel.includes(q) ||
+        item.poolKey.toLowerCase().includes(q)
+      );
+    });
+  }, [pairs, pairQuery, pairDexFilter]);
+
+  useEffect(() => {
+    if (!pairOpen) return;
+    pairSearchRef.current?.focus();
+    const onPointerDown = (event: MouseEvent) => {
+      if (pairPickerRef.current && !pairPickerRef.current.contains(event.target as Node)) {
+        setPairOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPairOpen(false);
+    };
+    window.addEventListener('mousedown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [pairOpen]);
 
   const requested = params.get('pool');
   const pair = useMemo(
@@ -584,26 +637,132 @@ export function AdvancedTrading() {
         ) : (
         <>
         <div className="advanced-toolbar">
-          <div className="pair-select">
+          <div className="pair-select" ref={pairPickerRef}>
             <span className="label">Market</span>
-            <select
-              value={pair?.poolKey ?? ''}
-              onChange={(event) => changePair(event.target.value)}
-              aria-label="Select trading pair"
-              className="input"
-            >
-              {pairs.length === 0 && <option value="">No ASE pairs indexed</option>}
-              {pairs.map((item) => {
-                const view = marketFor(item);
-                const volume = view?.volume24Ase;
-                return (
-                  <option key={item.poolKey} value={item.poolKey}>
-                    {view?.symbol ?? item.base}/ASE · {item.dex === 'asedex' ? 'AseDex' : `Auras v${item.version ?? 2}`}
-                    {volume ? ` · ${fmtNum(Math.round(volume))} ASE 24h` : ''}
-                  </option>
-                );
-              })}
-            </select>
+            <div className="market-picker">
+              <button
+                type="button"
+                className={pairOpen ? 'market-picker-trigger open' : 'market-picker-trigger'}
+                aria-haspopup="listbox"
+                aria-expanded={pairOpen}
+                aria-label="Select trading pair"
+                onClick={() => setPairOpen((v) => !v)}
+              >
+                <svg className="market-picker-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m21 21-4.3-4.3" />
+                </svg>
+                <span className="market-picker-value">
+                  {pair ? (
+                    <>
+                      <strong>{market?.symbol ?? pair.base}/ASE</strong>
+                      <small>
+                        {pair.dex === 'asedex' ? 'AseDex' : `Auras v${pair.version ?? 2}`}
+                        {market?.volume24Ase ? ` · ${fmtNum(Math.round(market.volume24Ase))} ASE 24h` : ''}
+                      </small>
+                    </>
+                  ) : (
+                    <span>No ASE pairs indexed</span>
+                  )}
+                </span>
+                <span className="market-picker-caret" aria-hidden="true">▾</span>
+              </button>
+
+              {pairOpen && (
+                <div className="market-picker-popover" role="dialog" aria-label="Search markets">
+                  <div className="market-picker-search">
+                    <svg className="market-picker-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <circle cx="11" cy="11" r="7" />
+                      <path d="m21 21-4.3-4.3" />
+                    </svg>
+                    <input
+                      ref={pairSearchRef}
+                      type="text"
+                      value={pairQuery}
+                      onChange={(event) => setPairQuery(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && filteredPairs.length > 0) {
+                          event.preventDefault();
+                          changePair(filteredPairs[0].poolKey);
+                          setPairOpen(false);
+                          setPairQuery('');
+                        }
+                      }}
+                      placeholder="Search ticker, e.g. AURA, POLKADOT…"
+                      aria-label="Search market by ticker"
+                    />
+                    {pairQuery && (
+                      <button type="button" className="market-picker-clear" aria-label="Clear search" onClick={() => setPairQuery('')}>
+                        ×
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="market-picker-filters" role="group" aria-label="Filter by DEX">
+                    {([
+                      { id: 'all', label: `All (${pairs.length})` },
+                      { id: 'auras', label: `Auras (${aurasCount})` },
+                      { id: 'asedex', label: `AseDex (${asedexCount})` },
+                    ] as const).map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={pairDexFilter === item.id ? 'chip active' : 'chip'}
+                        onClick={() => setPairDexFilter(item.id)}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="market-picker-list" role="listbox" aria-label="Trading pairs">
+                    {filteredPairs.length === 0 ? (
+                      <div className="market-picker-empty">
+                        {pairQuery.trim()
+                          ? <>No markets match &ldquo;{pairQuery.trim()}&rdquo;.</>
+                          : `No ${pairDexFilter === 'asedex' ? 'AseDex' : pairDexFilter === 'auras' ? 'Auras' : ''} markets available.`}
+                      </div>
+                    ) : (
+                      <>
+                        {filteredPairs.slice(0, 80).map((item) => {
+                          const view = marketFor(item);
+                          const volume = view?.volume24Ase;
+                          const active = item.poolKey === pair?.poolKey;
+                          return (
+                            <button
+                              key={item.poolKey}
+                              type="button"
+                              role="option"
+                              aria-selected={active}
+                              className={active ? 'market-picker-option active' : 'market-picker-option'}
+                              onClick={() => {
+                                changePair(item.poolKey);
+                                setPairOpen(false);
+                                setPairQuery('');
+                              }}
+                            >
+                              <span className="market-picker-option-left">
+                                <strong>{view?.symbol ?? item.base}/ASE</strong>
+                                <span className="market-picker-dex">{item.dex === 'asedex' ? 'AseDex' : `Auras v${item.version ?? 2}`}</span>
+                              </span>
+                              <span className="market-picker-option-right mono">
+                                <span>{view?.priceAse ? `${priceFmt(view.priceAse)} ASE` : '—'}</span>
+                                {volume ? <small>{fmtNum(Math.round(volume))} 24h</small> : null}
+                              </span>
+                            </button>
+                          );
+                        })}
+                        {filteredPairs.length > 80 && (
+                          <div className="market-picker-more">
+                            Showing top 80 of {filteredPairs.length} — type ticker to filter
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           <dl className="advanced-market-stats">
