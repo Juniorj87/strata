@@ -290,6 +290,7 @@ export function Strategies() {
           </button>
           <Link to="/marketplace" className="seg-tab">
             Marketplace ↗
+            <span className="seg-tab-soon">Coming soon</span>
           </Link>
         </div>
       </section>

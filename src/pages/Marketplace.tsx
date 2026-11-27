@@ -114,18 +114,20 @@ export function Marketplace() {
           </Link>
           <Link to="/marketplace" className="seg-tab active">
             Marketplace
+            <span className="seg-tab-soon">Coming soon</span>
           </Link>
         </div>
       </section>
 
       <section className="wrap marketplace-page" style={{ paddingBottom: 90 }}>
-        {!marketplace.data?.configured && !marketplace.loading && (
+        {!marketplace.loading && marketplace.data?.configured === false && (
           <div className="notice marketplace-notice" style={{ marginTop: 6 }}>
-            <strong>Community publishing is not enabled yet</strong>
-            <span>The shared publishing registry is not connected yet; verified public contracts discovered on chain still appear below.</span>
+            <strong>Publishing is coming soon</strong>
+            <span>Sharing your own strategy and browsing community listings is not open yet. Verified strategies found on chain are listed under Live contracts.</span>
           </div>
         )}
 
+        {marketplace.data?.configured !== false && <>
         <div className="marketplace-toolbar" style={{ marginTop: 28 }}>
           <input aria-label="Search marketplace" className="input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by name, description or tag…" />
           <select aria-label="Filter by strategy type" className="input" value={template} onChange={(event) => setTemplate(event.target.value)}>
@@ -155,6 +157,7 @@ export function Marketplace() {
             </article>
           ))}
         </div>
+        </>}
 
         <div className="section-head" style={{ marginTop: 42 }}>
           <div><span className="label">Open discovery</span><h2 className="section-title">Other verified strategies</h2></div>
