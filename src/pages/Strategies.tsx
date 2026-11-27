@@ -300,7 +300,7 @@ export function Strategies() {
             <div className="chip-row" style={{ marginBottom: 22 }}>
               {[
                 { id: 'all', label: `All templates (${STRATEGY_GUIDES.length})` },
-                { id: 'perps', label: 'AsePad Perps (6)' },
+                { id: 'perps', label: 'AsePad Perps · Coming soon', disabled: true },
                 { id: 'accumulation', label: 'Accumulation' },
                 { id: 'take-profit', label: 'Take-profit' },
                 { id: 'range', label: 'Range / grid' },
@@ -311,8 +311,10 @@ export function Strategies() {
                 <button
                   key={chip.id}
                   type="button"
+                  disabled={chip.disabled}
+                  aria-disabled={chip.disabled}
                   className={category === chip.id ? 'chip-btn active' : 'chip-btn'}
-                  onClick={() => setCategory(chip.id)}
+                  onClick={() => { if (!chip.disabled) setCategory(chip.id); }}
                 >
                   {chip.label}
                 </button>
@@ -367,13 +369,15 @@ export function Strategies() {
                     </div>
 
                     <div>
-                      {['momentum-signal', 'momentum-trader', 'scale'].includes(guide.id) ? (
+                      {guide.category === 'perps' ? (
+                        <span className="badge-soon">Coming soon</span>
+                      ) : ['momentum-signal', 'momentum-trader', 'scale'].includes(guide.id) ? (
                         <span className="muted" style={{ fontSize: 13.5, lineHeight: 1.6 }}>
                           Advanced template · deployed from the CLI, not the simple builder
                         </span>
                       ) : (
                         <Link
-                          to={guide.category === 'perps' ? `/deploy?template=${guide.id}&venue=perps` : `/deploy?template=${guide.id}`}
+                          to={`/deploy?template=${guide.id}`}
                           className="btn btn-ghost"
                         >
                           Use this template <span className="arr" aria-hidden="true">→</span>

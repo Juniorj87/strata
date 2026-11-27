@@ -77,7 +77,7 @@ export function Home() {
           <div className="home-market-summary-head"><span>LIVE VENUES</span><span className="home-live-dot" /></div>
           <div className="home-venue-row"><span className="home-venue-mark">A</span><span><strong>Auras v2</strong><small>Spot AMM pools &amp; limit orders</small></span><b>LIVE</b></div>
           <div className="home-venue-row"><span className="home-venue-mark alt">D</span><span><strong>AseDex</strong><small>Spot AMM liquidity pools</small></span><b>LIVE</b></div>
-          <div className="home-venue-row"><span className="home-venue-mark">P</span><span><strong>AsePad Perps</strong><small>perps.asepad.fun · Leveraged Perps</small></span><b>LIVE</b></div>
+          <div className="home-venue-row"><span className="home-venue-mark">P</span><span><strong>AsePad Perps</strong><small>perps.asepad.fun · Leveraged Perps</small></span><b className="is-soon">SOON</b></div>
           <div className="home-market-summary-foot"><span>Indexed Spot pools</span><strong className="mono">{poolCount > 0 ? fmtNum(poolCount) : '—'}</strong></div>
         </div>
       </section>

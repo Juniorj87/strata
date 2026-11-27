@@ -122,14 +122,17 @@ function limitPriceWei(price: string): bigint {
   return parseUnits(price.trim(), 18);
 }
 
+const PERPS_ENABLED: boolean = false;
+
 export function AdvancedTrading() {
   const wallet = useWallet();
   const client = useAsentum();
   const [params, setParams] = useSearchParams();
-  const initialPerps = params.get('venue') === 'perps' || Boolean(params.get('market'));
+  const initialPerps = PERPS_ENABLED && (params.get('venue') === 'perps' || Boolean(params.get('market')));
   const [tradingVenue, setTradingVenue] = useState<'spot' | 'perps'>(initialPerps ? 'perps' : 'spot');
 
   const switchTradingVenue = (nextVenue: 'spot' | 'perps', sideOverride?: 'LONG' | 'SHORT') => {
+    if (!PERPS_ENABLED && nextVenue === 'perps') return;
     setTradingVenue(nextVenue);
     setParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -555,7 +558,18 @@ export function AdvancedTrading() {
         <div className="advanced-head-actions">
           <div className="seg-tabs" style={{ marginTop: 0 }} role="tablist" aria-label="Trading market type">
             <button type="button" role="tab" aria-selected={tradingVenue === 'spot'} className={tradingVenue === 'spot' ? 'seg-tab active' : 'seg-tab'} onClick={() => switchTradingVenue('spot')}>Spot AMM</button>
-            <button type="button" role="tab" aria-selected={tradingVenue === 'perps'} className={tradingVenue === 'perps' ? 'seg-tab active' : 'seg-tab'} onClick={() => switchTradingVenue('perps')}>AsePad Perps</button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tradingVenue === 'perps'}
+              aria-disabled={!PERPS_ENABLED}
+              disabled={!PERPS_ENABLED}
+              className={`${tradingVenue === 'perps' ? 'seg-tab active' : 'seg-tab'}${!PERPS_ENABLED ? ' is-disabled' : ''}`}
+              onClick={() => switchTradingVenue('perps')}
+            >
+              AsePad Perps
+              {!PERPS_ENABLED && <span className="seg-tab-soon">Coming soon</span>}
+            </button>
           </div>
           <Link className="btn btn-ghost btn-sm" to="/swap">Simple swap</Link>
           <Link className="btn btn-primary btn-sm" to={tradingVenue === 'perps' ? '/deploy?venue=perps' : '/deploy'}>
@@ -1023,23 +1037,27 @@ export function AdvancedTrading() {
             <div className="panel advanced-perps">
               <div className="panel-head">
                 <div>
-                  <span className="label">AsePad Perps · live venue</span>
+                  <span className="label">{PERPS_ENABLED ? 'AsePad Perps · live venue' : 'AsePad Perps · coming soon'}</span>
                   <p className="muted">Long / short · leverage · margin</p>
                 </div>
-                <span className="status-badge live">Live</span>
+                <span className={PERPS_ENABLED ? 'status-badge live' : 'status-badge off'}>
+                  {PERPS_ENABLED ? 'Live' : 'Coming soon'}
+                </span>
               </div>
               <p className="advanced-perps-copy">
-                {perps.reason}
+                {PERPS_ENABLED ? perps.reason : 'Leveraged perpetual futures on perps.asepad.fun are coming soon.'}
                 <InfoTip
                   label="About AsePad Perps"
-                  text="Spot bots run on AMMs without leverage; switch to AsePad Perps for Long/Short positions, Vault margin, or autonomous Perp bots on perps.asepad.fun."
+                  text="Spot bots run on AMMs without leverage; leveraged Long/Short perpetuals and Perp bots on perps.asepad.fun are coming soon."
                 />
               </p>
-              <div className="advanced-perps-actions">
-                <button type="button" className="btn btn-primary btn-sm" onClick={() => switchTradingVenue('perps', 'LONG')}>Long ↑</button>
-                <button type="button" className="btn btn-ghost btn-sm" onClick={() => switchTradingVenue('perps', 'SHORT')}>Short ↓</button>
-                <Link className="btn btn-ghost btn-sm" to="/deploy?venue=perps">Perp bots →</Link>
-              </div>
+              {PERPS_ENABLED && (
+                <div className="advanced-perps-actions">
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => switchTradingVenue('perps', 'LONG')}>Long ↑</button>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => switchTradingVenue('perps', 'SHORT')}>Short ↓</button>
+                  <Link className="btn btn-ghost btn-sm" to="/deploy?venue=perps">Perp bots →</Link>
+                </div>
+              )}
             </div>
           </aside>
         </div>

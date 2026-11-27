@@ -8950,3 +8950,58 @@ select.input {
   gap: 6px;
   flex-wrap: wrap;
 }
+
+/* 12. Disabled / Coming Soon Tabs & Venue Badges */
+.seg-tab.is-disabled,
+.seg-tab:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+.seg-tab.is-disabled:hover,
+.seg-tab:disabled:hover {
+  color: var(--muted);
+}
+
+.seg-tab-soon,
+.badge-soon {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-3);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.deploy-venue-card.is-disabled,
+.deploy-venue-card:disabled {
+  opacity: 0.66;
+  cursor: not-allowed;
+}
+
+.deploy-venue-card.is-disabled:hover,
+.deploy-venue-card:disabled:hover {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+.chip-btn:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.chip-btn:disabled:hover {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+.home-venue-row > b.is-soon {
+  color: var(--muted);
+}

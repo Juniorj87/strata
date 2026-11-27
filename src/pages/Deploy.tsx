@@ -145,16 +145,20 @@ function initArgsFor(
   }
 }
 
+const PERPS_ENABLED: boolean = false;
+
 export function Deploy() {
   const [params, setSearchParams] = useSearchParams();
   const initialTokenHandledRef = useRef(false);
   const requestedTemplateParam = params.get('template');
   const initialPerpsMode =
-    params.get('venue') === 'perps' ||
-    isPerpTemplate(requestedTemplateParam) ||
-    params.get('mode') === 'direct' ||
-    Boolean(params.get('market')) ||
-    Boolean(params.get('kind'));
+    PERPS_ENABLED && (
+      params.get('venue') === 'perps' ||
+      isPerpTemplate(requestedTemplateParam) ||
+      params.get('mode') === 'direct' ||
+      Boolean(params.get('market')) ||
+      Boolean(params.get('kind'))
+    );
   const [builderVenue, setBuilderVenue] = useState<'spot' | 'perps'>(initialPerpsMode ? 'perps' : 'spot');
   // There is one builder now. Old links that still say ?mode=pro land on the
   // simple flow, and a pro-only template falls back to DCA instead of opening
@@ -1090,8 +1094,11 @@ export function Deploy() {
             type="button"
             role="tab"
             aria-selected={builderVenue === 'perps'}
-            className={builderVenue === 'perps' ? 'deploy-venue-card active' : 'deploy-venue-card'}
+            aria-disabled={!PERPS_ENABLED}
+            disabled={!PERPS_ENABLED}
+            className={`${builderVenue === 'perps' ? 'deploy-venue-card active' : 'deploy-venue-card'}${!PERPS_ENABLED ? ' is-disabled' : ''}`}
             onClick={() => {
+              if (!PERPS_ENABLED) return;
               setBuilderVenue('perps');
               setSearchParams((prev) => {
                 const next = new URLSearchParams(prev);
@@ -1102,7 +1109,9 @@ export function Deploy() {
           >
             <div className="deploy-venue-top">
               <strong>AsePad Perps Bots</strong>
-              <span className="perp-badge-live">LIVE · perps.asepad.fun</span>
+              <span className={PERPS_ENABLED ? 'perp-badge-live' : 'badge-soon'}>
+                {PERPS_ENABLED ? 'LIVE · perps.asepad.fun' : 'Coming soon'}
+              </span>
             </div>
             <small>Long / Short Cron contracts or native TWAP, Scale &amp; Trailing orders</small>
           </button>
